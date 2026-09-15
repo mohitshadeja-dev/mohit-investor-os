@@ -3,9 +3,11 @@ FROM python:3.11-slim
 WORKDIR /app
 
 COPY mohit_investor_os_app.zip /app/app.zip
+COPY fix_index.py /app/fix_index.py
 
 RUN apt-get update && apt-get install -y unzip && \
     unzip /app/app.zip -d /app && \
+    python /app/fix_index.py && \
     pip install --no-cache-dir -r /app/requirements.txt && \
     mv /usr/local/bin/uvicorn /usr/local/bin/uvicorn-real && \
     printf '%s\n' '#!/bin/sh' \
