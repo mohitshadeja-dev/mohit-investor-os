@@ -7,17 +7,28 @@ DB = Path(os.getenv('APP_DB_PATH', './mohit_os.db'))
 KEYFILE = Path(os.getenv('APP_KEY_PATH', './.mohit_os_fernet.key'))
 
 def _conn():
+    DB.parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(DB)
     c.execute('CREATE TABLE IF NOT EXISTS secrets (k TEXT PRIMARY KEY, v BLOB NOT NULL)')
     return c
 
+def _valid_key(raw: bytes) -> bool:
+    try:
+        Fernet(raw)
+        return True
+    except Exception:
+        return False
+
 def _get_key() -> bytes:
-    env = os.getenv('APP_ENCRYPTION_KEY','').strip()
-    if env:
-        return env.encode()
+    env = os.getenv('APP_ENCRYPTION_KEY','').strip().encode()
+    if env and _valid_key(env):
+        return env
     if KEYFILE.exists():
-        return KEYFILE.read_bytes().strip()
+        existing = KEYFILE.read_bytes().strip()
+        if _valid_key(existing):
+            return existing
     key = Fernet.generate_key()
+    KEYFILE.parent.mkdir(parents=True, exist_ok=True)
     KEYFILE.write_bytes(key)
     try:
         KEYFILE.chmod(0o600)
