@@ -9,14 +9,12 @@ RUN apt-get update && apt-get install -y unzip && \
     pip install --no-cache-dir -r /app/requirements.txt && \
     mv /usr/local/bin/uvicorn /usr/local/bin/uvicorn-real && \
     printf '%s\n' '#!/bin/sh' \
-      'set -- "$@"' \
-      'out=""' \
-      'while [ "$#" -gt 0 ]; do' \
-      '  if [ "$1" = "\$PORT" ]; then set -- 8000 "${@:2}"; fi' \
-      '  out="$out \"$1\""' \
-      '  shift' \
+      'for arg in "$@"; do' \
+      '  if [ "$arg" = "\$PORT" ]; then' \
+      '    exec /usr/local/bin/uvicorn-real app.main:app --host 0.0.0.0 --port 8000' \
+      '  fi' \
       'done' \
-      'eval exec /usr/local/bin/uvicorn-real $out' \
+      'exec /usr/local/bin/uvicorn-real "$@"' \
       > /usr/local/bin/uvicorn && chmod +x /usr/local/bin/uvicorn
 
 EXPOSE 8000
