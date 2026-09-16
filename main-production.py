@@ -13,6 +13,7 @@ from .store import set_secret, get_secret, delete_secret
 from .kite_service import login_url, exchange_request_token, profile, fetch_minutes, client
 from .strategy import run_backtest, _norm, _daily_hlc, _first_touch_5m, gann_levels
 from .strategy_lab import run_lab
+from .options_backtest import run_options_backtest
 
 ROOT=Path(__file__).resolve().parent
 DB=Path(os.getenv('APP_DB_PATH','./mohit_os.db'))
@@ -30,6 +31,10 @@ class LabRequest(BaseModel):
     start_time:str='09:15'; end_time:str='15:30'; cost_points:float=0; slippage_points:float=0
 class SaveTestRequest(BaseModel): name:str=Field(min_length=1,max_length=100); symbol:str; config:dict; summary:dict; trades:list[dict]=[]
 class BatchRequest(BaseModel): symbols:list[str]; config:dict
+class DhanSettings(BaseModel): client_id:str=Field(min_length=3); access_token:str=Field(min_length=20)
+class OptionsBacktestRequest(BaseModel):
+    from_date:date=date(2025,9,5); to_date:date=date(2026,9,15)
+    quantity:int=Field(default=1300,gt=0); short_delta:float=Field(default=.50,gt=0,lt=1); hedge_delta:float=Field(default=.20,gt=0,lt=1)
 
 INSTRUMENT_CACHE={'ts':0,'rows':[]}; JOBS={}
 
@@ -37,6 +42,7 @@ def jconn():
     DB.parent.mkdir(parents=True,exist_ok=True); c=sqlite3.connect(DB); c.row_factory=sqlite3.Row
     c.execute('''CREATE TABLE IF NOT EXISTS journal(id INTEGER PRIMARY KEY AUTOINCREMENT,trade_key TEXT UNIQUE,trade_date TEXT,trade_no INTEGER,side TEXT,entry_time TEXT,entry REAL,stop REAL,target REAL,exit_time TEXT,exit REAL,reason TEXT,points REAL,status TEXT,notes TEXT DEFAULT '',updated_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS saved_backtests(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,symbol TEXT,config_json TEXT,summary_json TEXT,trades_json TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS option_data_cache(cache_key TEXT PRIMARY KEY,payload_json TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
     return c
 
 def _instruments():
@@ -69,6 +75,18 @@ def status():
     configured=bool(get_secret('kite_api_key') or os.getenv('KITE_API_KEY'))
     try:p=profile(); return {'configured':configured,'connected':True,'user_id':p.get('user_id'),'user_name':p.get('user_name')}
     except Exception as e:return {'configured':configured,'connected':False,'detail':str(e)}
+
+@app.get('/api/dhan/status')
+def dhan_status():
+    return {'configured':bool(get_secret('dhan_client_id') and get_secret('dhan_access_token')),
+            'client_id':get_secret('dhan_client_id') or ''}
+
+@app.post('/api/dhan/settings')
+def dhan_settings(s:DhanSettings):
+    try:
+        set_secret('dhan_client_id',s.client_id.strip());set_secret('dhan_access_token',s.access_token.strip())
+        return {'saved':True}
+    except Exception as e:raise HTTPException(400,f'Could not save Dhan credentials: {e}')
 @app.post('/api/kite/settings')
 def save_settings(s:KiteSettings):
     try:set_secret('kite_api_key',s.api_key.strip());set_secret('kite_api_secret',s.api_secret.strip());delete_secret('kite_access_token');return {'saved':True}
@@ -162,6 +180,45 @@ def start_batch(req:BatchRequest):
 def batch_status(job_id:str):
     if job_id not in JOBS:raise HTTPException(404,'Batch job not found')
     return JOBS[job_id]
+
+def _option_cache_get(key):
+    with jconn() as c:r=c.execute('SELECT payload_json FROM option_data_cache WHERE cache_key=?',(key,)).fetchone()
+    return json.loads(r['payload_json']) if r else None
+
+def _option_cache_set(key,payload):
+    with jconn() as c:c.execute('INSERT OR REPLACE INTO option_data_cache(cache_key,payload_json) VALUES(?,?)',(key,json.dumps(payload)))
+
+def _options_worker(jid,req):
+    job=JOBS[jid]
+    try:
+        token=get_secret('dhan_access_token')
+        if not token:raise RuntimeError('Connect Dhan first: Client ID and 24-hour access token are required')
+        job.update({'stage':'signals','message':'Running the unchanged 7575 underlying engine'})
+        df=fetch_minutes(int(os.getenv('NIFTY_INSTRUMENT_TOKEN','256265')),req.from_date,req.to_date)
+        cfg={'symbol':'NIFTY 50','from_date':str(req.from_date),'to_date':str(req.to_date),'touch_interval':5,'confirm_interval':1,
+             'wma_factor':.382,'gann_step':.125,'touch_side':'both_recalc','entry_mode':'trigger','direction':'both',
+             'same_bar_policy':'stop_first','target_mode':'points','target_value':150,'stop_mode':'points','stop_value':150,
+             'reentry':False,'max_trades_per_day':3,'start_time':'09:15','end_time':'15:30','cost_points':0,'slippage_points':0}
+        signal_summary,signals,_,_=run_lab(df,cfg)
+        job.update({'signal_summary':signal_summary,'signal_trades':len(signals),'stage':'options'})
+        def progress(done,total,message):job.update({'done':done,'total':total,'message':message})
+        summary,ledger=run_options_backtest(signals,token,req.quantity,req.short_delta,req.hedge_delta,_option_cache_get,_option_cache_set,progress)
+        job.update({'status':'complete','stage':'complete','summary':summary,'trades':ledger,'message':'Options backtest complete'})
+    except Exception as e:job.update({'status':'error','stage':'error','error':str(e),'message':str(e)})
+
+@app.post('/api/options/backtest')
+def options_backtest(req:OptionsBacktestRequest):
+    if req.from_date>=req.to_date:raise HTTPException(400,'From date must be before To date')
+    if req.hedge_delta>=req.short_delta:raise HTTPException(400,'Hedge delta must be lower than sold delta')
+    if not get_secret('dhan_access_token'):raise HTTPException(400,'Dhan setup required for real expired weekly option prices')
+    jid=uuid.uuid4().hex[:10];JOBS[jid]={'id':jid,'kind':'options','status':'running','stage':'queued','done':0,'total':42,'message':'Queued'}
+    threading.Thread(target=_options_worker,args=(jid,req),daemon=True).start();return JOBS[jid]
+
+@app.get('/api/options/backtest/{job_id}')
+def options_backtest_status(job_id:str):
+    job=JOBS.get(job_id)
+    if not job or job.get('kind')!='options':raise HTTPException(404,'Options backtest job not found')
+    return job
 
 # Live alert + journal engine retained for the locked default strategy.
 def scan_live(df:pd.DataFrame,target_points:float=100.0):
