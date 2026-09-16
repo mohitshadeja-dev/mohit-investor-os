@@ -138,13 +138,14 @@ def run_same_day_sr(df,cfg):
         sdate,day=sessions[di];_,prev=sessions[di-1]
         day=day[(day.date.dt.time>=time(sh,sm))&(day.date.dt.time<=time(eh,em))].reset_index(drop=True)
         if day.empty:continue
+        ph=float(prev.high.max());pl=float(prev.low.min());pc=float(prev.iloc[-1].close)
         first5=day.iloc[:5]
         first_body=(float(first5.iloc[-1].close)-float(first5.iloc[0].open)) if len(first5)==5 else 0
-        block_long=first_body < -120
-        block_short=first_body > 120
+        opening_gap=float(day.iloc[0].open)-pc
+        block_long=opening_gap > 120 and first_body < 0
+        block_short=opening_gap < -120 and first_body > 0
         if block_long:stats['large_red_first_candle']+=1
         if block_short:stats['large_green_first_candle']+=1
-        ph=float(prev.high.max());pl=float(prev.low.min());pc=float(prev.iloc[-1].close)
         res=pc+(ph-pl)*wma;sup=pc-(ph-pl)*wma
         refs={
             'RESISTANCE':{'level':float(res),'touch':_first_touch_time(day,float(res),'RESISTANCE'),'active':False,'armed':True},
@@ -202,8 +203,8 @@ def run_same_day_sr(df,cfg):
                 if r['touch'] is None:continue
                 if r['touch']>cursor:continue
                 side='LONG' if typ=='RESISTANCE' else 'SHORT'
-                # A >120-point red first 5m candle suppresses Resistance LONG;
-                # a >120-point green first 5m candle suppresses Support SHORT.
+                # Gap-up >120 plus a red first 5m candle suppresses Resistance LONG;
+                # gap-down >120 plus a green first 5m candle suppresses Support SHORT.
                 # The opposite WMA reference remains live and can become trade #1.
                 if block_long and side=='LONG':continue
                 if block_short and side=='SHORT':continue
