@@ -64,6 +64,17 @@ def _run_leg_positional(side,entry,stop,target,start_date,start_time,dates,sessi
     pts=(ex-entry) if side=='LONG' else (entry-ex)
     return {'leg':leg,'side':side,'entry':float(entry),'stop':float(stop),'target':float(target),'exit':float(ex),'exit_time':ext,'exit_date':exit_date,'reason':reason,'points':float(pts),'stop_bar':stop_bar}
 
+def _stop_price(side,entry,gann_stop,mode,points):
+    mode=str(mode or 'gann').strip().lower()
+    if mode not in ('gann','points'):
+        raise ValueError("Stop mode must be 'gann' or 'points'")
+    points=float(points)
+    if points<=0:
+        raise ValueError('Fixed stop points must be greater than zero')
+    if mode=='points':
+        return float(entry-points if side=='LONG' else entry+points)
+    return float(gann_stop)
+
 def _summary(trades,weeks,skipped_gap,skipped_first_candle,no_setup,blocked_tuesday,blocked_fib):
     pts=[float(t['points']) for t in trades]; wins=[p for p in pts if p>0]; losses=[p for p in pts if p<0]
     eq=peak=dd=0
@@ -87,7 +98,9 @@ def _summary(trades,weeks,skipped_gap,skipped_first_candle,no_setup,blocked_tues
     }
 
 def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_target_points=30.0,
-               same_bar_policy='stop_first',first_candle_distance_points=150.0):
+               same_bar_policy='stop_first',first_candle_distance_points=150.0,reverse_target_points=200.0,
+               primary_stop_mode='gann',primary_stop_points=100.0,
+               reverse_stop_mode='gann',reverse_stop_points=100.0):
     """Weekly WMA-Gann positional strategy. All signals and exits use completed 5-minute closes.
 
     Setup sequence:
@@ -102,11 +115,11 @@ def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_ta
       150 or more points below the previous-day High. Resume on the next available day.
 
     Position management:
-      Primary target = 100 points. SL = opposite Gann boundary.
+      Primary target and SL are editable. SL can use the opposite Gann boundary or fixed points.
       Position is carried across days and weeks until TARGET or SL is confirmed by a 5m close.
       While any primary/reverse position is open, no fresh weekly setup is allowed.
       If PRIMARY SL is confirmed, immediately take one reverse leg at that 5m close.
-      Reverse target = 100 points; reverse SL = opposite Gann boundary.
+      Reverse target and SL are editable. SL can use the opposite Gann boundary or fixed points.
       No repeated flip-flopping after the reverse leg.
       If history ends while a position is open, close at final available 5m close as DATA_END for backtest accounting.
     """
@@ -170,20 +183,28 @@ def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_ta
                 else:no_setup+=1; rec['status']='NO_5M_CLOSE_GANN_TRIGGER'
                 attempts.append(rec); continue
 
-            entry=float(entrybar.close); stop=float(sell if side=='LONG' else buy); target=float(entry+target_points if side=='LONG' else entry-target_points)
+            entry=float(entrybar.close)
+            stop=_stop_price(side,entry,sell if side=='LONG' else buy,primary_stop_mode,primary_stop_points)
+            target=float(entry+target_points if side=='LONG' else entry-target_points)
             leg1=_run_leg_positional(side,entry,stop,target,cand,entrybar.date,dates,sessions,'PRIMARY')
             t1={**rec,'status':'TRADE','leg':'PRIMARY','side':side,'touch_time':str(touch['time']),'entry_date':str(cand),'entry_time':str(entrybar.date),
-                'entry':round(entry,2),'stop':round(stop,2),'target':round(target,2),'exit_date':str(leg1['exit_date']),'exit_time':str(leg1['exit_time']),
+                'entry':round(entry,2),'stop':round(stop,2),'stop_mode':str(primary_stop_mode).lower(),
+                'stop_points':round(float(primary_stop_points),2) if str(primary_stop_mode).lower()=='points' else None,
+                'target':round(target,2),'exit_date':str(leg1['exit_date']),'exit_time':str(leg1['exit_time']),
                 'exit':round(leg1['exit'],2),'reason':leg1['reason'],'points':round(leg1['points'],2),
                 'carried_overnight':bool(pd.Timestamp(leg1['exit_date']).date()>pd.Timestamp(cand).date())}
             trades.append(t1); attempts.append(t1); primary_done=True; blocked_until=leg1['exit_date']
 
             if leg1['reason']=='SL':
                 rev_side='SHORT' if side=='LONG' else 'LONG'; rev_entry=float(leg1['exit'])
-                rev_stop=float(buy if rev_side=='SHORT' else sell); rev_target=float(rev_entry-100 if rev_side=='SHORT' else rev_entry+100)
+                rev_stop=_stop_price(rev_side,rev_entry,buy if rev_side=='SHORT' else sell,reverse_stop_mode,reverse_stop_points)
+                rev_target=float(rev_entry-reverse_target_points if rev_side=='SHORT' else rev_entry+reverse_target_points)
                 leg2=_run_leg_positional(rev_side,rev_entry,rev_stop,rev_target,leg1['exit_date'],leg1['exit_time'],dates,sessions,'REVERSE')
                 t2={**rec,'status':'REVERSE_TRADE','leg':'REVERSE','side':rev_side,'touch_time':str(touch['time']),'entry_date':str(leg1['exit_date']),
-                    'entry_time':str(leg1['exit_time']),'entry':round(rev_entry,2),'stop':round(rev_stop,2),'target':round(rev_target,2),
+                    'entry_time':str(leg1['exit_time']),'entry':round(rev_entry,2),'stop':round(rev_stop,2),
+                    'stop_mode':str(reverse_stop_mode).lower(),
+                    'stop_points':round(float(reverse_stop_points),2) if str(reverse_stop_mode).lower()=='points' else None,
+                    'target':round(rev_target,2),
                     'exit_date':str(leg2['exit_date']),'exit_time':str(leg2['exit_time']),'exit':round(leg2['exit'],2),'reason':leg2['reason'],
                     'points':round(leg2['points'],2),'carried_overnight':bool(pd.Timestamp(leg2['exit_date']).date()>pd.Timestamp(leg1['exit_date']).date()),'reversed_from':side}
                 trades.append(t2); attempts.append(t2); blocked_until=leg2['exit_date']
