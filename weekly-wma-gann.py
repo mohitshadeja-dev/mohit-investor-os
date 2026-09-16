@@ -24,7 +24,7 @@ def _bars5(day):
     return x.resample('5min',origin='start_day',offset='15min').agg(open=('open','first'),high=('high','max'),low=('low','min'),close=('close','last')).dropna().reset_index()
 
 def _first_close_break(day,resistance,support):
-    """First WMA level confirmation using 5-minute CLOSE only."""
+    """First WMA level confirmation using completed 5-minute CLOSE only."""
     for _,b in _bars5(day).iterrows():
         c=float(b.close)
         if c>=resistance:
@@ -43,31 +43,34 @@ def _summary(trades,weeks,skipped_gap,no_setup,blocked_tuesday):
         'win_rate':round(100*len(wins)/len(trades),2) if trades else 0,
         'total_points':round(sum(pts),2),'avg_points':round(sum(pts)/len(trades),2) if trades else 0,
         'targets':sum(t['reason']=='TARGET' for t in trades),'stops':sum(t['reason']=='SL' for t in trades),
-        'eod':sum(t['reason']=='EOD' for t in trades),'max_drawdown_points':round(dd,2),
+        'eod':sum(t['reason']=='FRIDAY_EOD' for t in trades),'max_drawdown_points':round(dd,2),
         'skipped_gap_days':skipped_gap,'no_setup_days':no_setup,'ambiguous_touch_days':0,
         'blocked_by_tuesday_range':blocked_tuesday,
         'wednesday_trades':sum(t['trade_day']=='WED' for t in trades),'thursday_trades':sum(t['trade_day']=='THU' for t in trades),'friday_trades':sum(t['trade_day']=='FRI' for t in trades),
         'long_points':round(sum(t['points'] for t in trades if t['side']=='LONG'),2),
         'short_points':round(sum(t['points'] for t in trades if t['side']=='SHORT'),2),
+        'overnight_carries':sum(t.get('carried_overnight',False) for t in trades),
     }
 
-def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_target_points=30.0,same_bar_policy='stop_first'):
-    """Weekly WMA-Gann strategy — ALL trading decisions use completed 5-minute candle closes.
+def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=300.0,gap_near_target_points=30.0,same_bar_policy='stop_first'):
+    """Weekly WMA-Gann strategy — pure completed 5-minute closing basis.
 
     Tuesday expiry anchor -> Wednesday attempt using Tuesday H/L/C.
     If no valid trade Wednesday: recalculate from Wednesday -> Thursday.
     If no valid trade Thursday: recalculate from Thursday -> Friday.
 
-    Rules:
-      1) WMA Support/Resistance is considered reached only when a 5m candle CLOSES beyond it.
-      2) Gann levels are calculated from that confirmed WMA boundary.
-      3) LONG only on a 5m CLOSE >= Gann Buy Above AND > Tuesday High.
-      4) SHORT only on a 5m CLOSE <= Gann Sell Below AND < Tuesday Low.
-      5) Target is reached only on a 5m CLOSE at/through entry +/- target points.
-      6) SL is hit only on a 5m CLOSE beyond the opposite Gann boundary.
-      7) EOD exit = final completed 5m close.
-      8) Maximum ONE trade for the whole week.
-      9) Near-target skip is also evaluated from a completed 5m close, not intrabar/open.
+    Entry rules:
+      * WMA Support/Resistance must be confirmed by a completed 5m CLOSE.
+      * LONG only on a 5m CLOSE >= Gann Buy Above AND > Tuesday High.
+      * SHORT only on a 5m CLOSE <= Gann Sell Below AND < Tuesday Low.
+
+    Position rules:
+      * Target = 300 points by default, triggered only by a completed 5m CLOSE.
+      * SL = opposite Gann boundary, triggered only by a completed 5m CLOSE.
+      * Open position is carried overnight across the remaining trading days of the same week.
+      * No EOD exit on Wednesday/Thursday.
+      * If neither target nor SL is confirmed by Friday, exit at Friday's final 5m CLOSE.
+      * Maximum ONE trade for the whole week.
     """
     d=_norm(df); d['session']=d.date.dt.date
     sessions={k:v.drop(columns='session').reset_index(drop=True) for k,v in d.groupby('session',sort=True)}
@@ -102,7 +105,6 @@ def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_ta
                 no_setup+=1; rec['status']='NO_5M_CLOSE_WMA_BREAK'; attempts.append(rec); continue
             buy,sell=_gann(touch['level'],float(gann_step)); rec.update({'first_touch':touch['type'],'touch_close':round(touch['close'],2),'buy_above':buy,'sell_below':sell})
             b5=_bars5(day); b5=b5[b5.date>=touch['time']].reset_index(drop=True)
-            # 20-30 point near-target skip is checked only from completed 5m closes.
             travel=max(0.0,float(target_points)-float(gap_near_target_points))
             first_close=float(b5.iloc[0].close) if len(b5) else None
             if first_close is not None and (first_close>=buy+travel or first_close<=sell-travel):
@@ -122,19 +124,38 @@ def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_ta
                 else:
                     no_setup+=1; rec['status']='NO_5M_CLOSE_GANN_TRIGGER'
                 attempts.append(rec); continue
+
             entry=float(entrybar.close); stop=float(sell if side=='LONG' else buy); target=float(entry+target_points if side=='LONG' else entry-target_points)
-            post=b5[b5.date>entrybar.date].reset_index(drop=True)
-            last5=b5.iloc[-1]
-            ex=float(last5.close); ext=last5.date; reason='EOD'
-            for _,bar in post.iterrows():
+
+            # Build all completed 5m closes from after entry through Friday of the same week.
+            carry_bars=[]
+            for dte in wdates:
+                wdnum=pd.Timestamp(dte).weekday()
+                if wdnum<wd or wdnum>4: continue
+                bday=_bars5(sessions[dte])
+                if dte==cand:
+                    bday=bday[bday.date>entrybar.date]
+                for _,bar in bday.iterrows():
+                    carry_bars.append((dte,bar))
+
+            # Default forced exit is final Friday/last available weekday close in this week.
+            if carry_bars:
+                last_date,last_bar=carry_bars[-1]
+                ex=float(last_bar.close); ext=last_bar.date; exit_date=last_date
+            else:
+                ex=entry; ext=entrybar.date; exit_date=cand
+            reason='FRIDAY_EOD'
+            for dte,bar in carry_bars:
                 c=float(bar.close)
                 hit_sl=c<=stop if side=='LONG' else c>=stop
                 hit_t=c>=target if side=='LONG' else c<=target
                 if hit_sl:
-                    ex=c; ext=bar.date; reason='SL'; break
+                    ex=c; ext=bar.date; exit_date=dte; reason='SL'; break
                 if hit_t:
-                    ex=c; ext=bar.date; reason='TARGET'; break
+                    ex=c; ext=bar.date; exit_date=dte; reason='TARGET'; break
+
             pts=(ex-entry) if side=='LONG' else (entry-ex)
-            tr={**rec,'status':'TRADE','side':side,'touch_time':str(touch['time']),'entry_time':str(entrybar.date),'entry':round(entry,2),'stop':round(stop,2),'target':round(target,2),'exit_time':str(ext),'exit':round(float(ex),2),'reason':reason,'points':round(float(pts),2)}
+            carried=pd.Timestamp(exit_date).date()>pd.Timestamp(cand).date()
+            tr={**rec,'status':'TRADE','side':side,'touch_time':str(touch['time']),'entry_time':str(entrybar.date),'entry':round(entry,2),'stop':round(stop,2),'target':round(target,2),'exit_date':str(exit_date),'exit_time':str(ext),'exit':round(float(ex),2),'reason':reason,'points':round(float(pts),2),'carried_overnight':bool(carried)}
             trades.append(tr); attempts.append(tr); traded=True
     return _summary(trades,week_count,skipped_gap,no_setup,blocked_tuesday),trades,attempts
