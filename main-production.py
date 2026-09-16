@@ -4,7 +4,7 @@ from datetime import date, timedelta
 from pathlib import Path
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -34,7 +34,7 @@ class BatchRequest(BaseModel): symbols:list[str]; config:dict
 class DhanSettings(BaseModel): client_id:str=Field(min_length=3); access_token:str=Field(min_length=20)
 class OptionsBacktestRequest(BaseModel):
     from_date:date=date(2025,9,5); to_date:date=date(2026,9,15)
-    quantity:int=Field(default=1300,gt=0); short_delta:float=Field(default=.50,gt=0,lt=1); hedge_delta:float=Field(default=.20,gt=0,lt=1)
+    quantity:int=Field(default=1300,gt=0)
 
 INSTRUMENT_CACHE={'ts':0,'rows':[]}; JOBS={}
 
@@ -188,6 +188,34 @@ def _option_cache_get(key):
 def _option_cache_set(key,payload):
     with jconn() as c:c.execute('INSERT OR REPLACE INTO option_data_cache(cache_key,payload_json) VALUES(?,?)',(key,json.dumps(payload)))
 
+@app.get('/api/options/stockmock-worklist.csv')
+def stockmock_worklist(from_date:date=date(2025,9,5),to_date:date=date(2026,9,15)):
+    """Export the locked 7,575.6 signal ledger as a manual StockMock simulator worklist."""
+    if from_date>=to_date:raise HTTPException(400,'From date must be before To date')
+    try:
+        df=fetch_minutes(int(os.getenv('NIFTY_INSTRUMENT_TOKEN','256265')),from_date,to_date)
+        cfg={'symbol':'NIFTY 50','from_date':str(from_date),'to_date':str(to_date),'touch_interval':5,'confirm_interval':1,
+             'wma_factor':.382,'gann_step':.125,'touch_side':'both_recalc','entry_mode':'trigger','direction':'both',
+             'same_bar_policy':'stop_first','target_mode':'points','target_value':150,'stop_mode':'points','stop_value':150,
+             'reentry':False,'max_trades_per_day':3,'start_time':'09:15','end_time':'15:30','cost_points':0,'slippage_points':0}
+        summary,trades,_,_=run_lab(df,cfg)
+        if abs(float(summary.get('total_points',0))-7575.6)>.05 or int(summary.get('trades',0))!=277:
+            raise RuntimeError(f"Locked baseline audit failed: {summary.get('trades')} trades / {summary.get('total_points')} points")
+        output=io.StringIO();columns=['date','trade_no','signal','entry_time','exit_time','option_type','test_a_sell_delta','test_a_buy_delta','test_b_sell_delta','test_b_buy_delta','expiry','quantity_units','underlying_entry','underlying_exit','exit_reason','underlying_points','stockmock_action']
+        writer=csv.DictWriter(output,fieldnames=columns);writer.writeheader()
+        for t in trades:
+            signal=t.get('side','');option_type='CALL' if signal=='SHORT' else 'PUT'
+            entry_time=str(t.get('entry_time') or '').split(' ')[-1][:5];exit_time=str(t.get('exit_time') or '').split(' ')[-1][:5]
+            writer.writerow({'date':t.get('date'),'trade_no':t.get('trade_no'),'signal':signal,'entry_time':entry_time,'exit_time':exit_time,
+                'option_type':option_type,'test_a_sell_delta':'0.80','test_a_buy_delta':'0.40','test_b_sell_delta':'0.50','test_b_buy_delta':'0.20',
+                'expiry':'NEAREST WEEKLY','quantity_units':1300,'underlying_entry':t.get('entry'),'underlying_exit':t.get('exit'),
+                'exit_reason':t.get('reason'),'underlying_points':t.get('points'),
+                'stockmock_action':f"{signal}: SELL {option_type} at chosen sell delta + BUY {option_type} at chosen hedge delta; square off both at {exit_time}"})
+        data=('\ufeff'+output.getvalue()).encode('utf-8');headers={'Content-Disposition':'attachment; filename="stockmock_gann_worklist_7575.csv"','X-Baseline-Audit':'PASS'}
+        return StreamingResponse(iter([data]),media_type='text/csv; charset=utf-8',headers=headers)
+    except HTTPException:raise
+    except Exception as e:raise HTTPException(400,str(e))
+
 def _options_worker(jid,req):
     job=JOBS[jid]
     try:
@@ -202,14 +230,18 @@ def _options_worker(jid,req):
         signal_summary,signals,_,_=run_lab(df,cfg)
         job.update({'signal_summary':signal_summary,'signal_trades':len(signals),'stage':'options'})
         def progress(done,total,message):job.update({'done':done,'total':total,'message':message})
-        summary,ledger=run_options_backtest(signals,token,req.quantity,req.short_delta,req.hedge_delta,_option_cache_get,_option_cache_set,progress)
-        job.update({'status':'complete','stage':'complete','summary':summary,'trades':ledger,'message':'Options backtest complete'})
+        pairs=[('80/40',.80,.40),('50/20',.50,.20)];comparisons=[];ledger=[]
+        for pair_name,short_delta,hedge_delta in pairs:
+            summary,rows=run_options_backtest(signals,token,req.quantity,short_delta,hedge_delta,_option_cache_get,_option_cache_set,progress)
+            summary.update({'pair':pair_name,'short_delta':short_delta,'hedge_delta':hedge_delta})
+            comparisons.append(summary)
+            ledger.extend([{**row,'pair':pair_name} for row in rows])
+        job.update({'status':'complete','stage':'complete','comparisons':comparisons,'trades':ledger,'message':'Both delta-pair backtests complete'})
     except Exception as e:job.update({'status':'error','stage':'error','error':str(e),'message':str(e)})
 
 @app.post('/api/options/backtest')
 def options_backtest(req:OptionsBacktestRequest):
     if req.from_date>=req.to_date:raise HTTPException(400,'From date must be before To date')
-    if req.hedge_delta>=req.short_delta:raise HTTPException(400,'Hedge delta must be lower than sold delta')
     if not get_secret('dhan_access_token'):raise HTTPException(400,'Dhan setup required for real expired weekly option prices')
     jid=uuid.uuid4().hex[:10];JOBS[jid]={'id':jid,'kind':'options','status':'running','stage':'queued','done':0,'total':42,'message':'Queued'}
     threading.Thread(target=_options_worker,args=(jid,req),daemon=True).start();return JOBS[jid]

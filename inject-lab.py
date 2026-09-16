@@ -6,7 +6,8 @@ for tag in [
     '<script src="/static/presets-7750.js"></script>',
     '<script src="/static/weekly-wma-gann.js"></script>',
     '<script src="/static/weekly-reverse-only.js"></script>',
-    '<script src="/static/options-window.js"></script>'
+    '<script src="/static/options-window.js"></script>',
+    '<script src="/static/stockmock-worklist.js"></script>'
 ]:
     if tag not in s:
         s=s.replace('</body>',tag+'\n</body>')
