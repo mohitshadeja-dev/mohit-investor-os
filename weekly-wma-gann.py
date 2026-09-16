@@ -83,7 +83,7 @@ def _run_leg(side,entry,stop,target,start_date,start_time,wdates,sessions,leg):
     pts=(ex-entry) if side=='LONG' else (entry-ex)
     return {'leg':leg,'side':side,'entry':float(entry),'stop':float(stop),'target':float(target),'exit':float(ex),'exit_time':ext,'exit_date':exit_date,'reason':reason,'points':float(pts),'stop_bar':stop_bar}
 
-def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=300.0,gap_near_target_points=30.0,same_bar_policy='stop_first'):
+def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_target_points=30.0,same_bar_policy='stop_first'):
     """Weekly WMA-Gann, pure 5-minute closing basis.
 
     Primary setup:
@@ -91,7 +91,7 @@ def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=300.0,gap_near_ta
       BUY: 5m close >= Gann Buy, > Tue High, and > previous-day Fib 0.382.
       SELL: 5m close <= Gann Sell, < Tue Low, and < previous-day Fib 0.618.
       Previous-day Fib is calculated from Low -> High of the immediate reference session.
-      Primary target defaults to 300 points; SL is opposite Gann level.
+      Primary target = 100 points; SL is opposite Gann level.
       Carry overnight; force exit Friday final 5m close.
 
     Reverse rule:
