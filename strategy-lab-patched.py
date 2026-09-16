@@ -28,11 +28,11 @@ def _augment(summary,trades):
     return summary
 
 
-def run_original_immediate(df, stop_rule='gann'):
+def run_original_immediate(df, stop_rule='gann', same_bar_policy='stop_first'):
     d=base.norm(df); d['session']=d.date.dt.date
     sessions=[(k,v.drop(columns='session').reset_index(drop=True)) for k,v in d.groupby('session',sort=True)]
     out=[]; daily=[]
-    stats={'test_days':max(0,len(sessions)-1),'no_touch':0,'touch_ambiguous':0,'no_trigger':0,'same_bar_both':0,'engine':'original_exact_trigger_'+stop_rule}
+    stats={'test_days':max(0,len(sessions)-1),'no_touch':0,'touch_ambiguous':0,'no_trigger':0,'same_bar_both':0,'engine':'original_exact_trigger_'+stop_rule+'_'+same_bar_policy}
     for di in range(1,len(sessions)):
         sdate,day=sessions[di]; _,prev=sessions[di-1]
         ph=float(prev.high.max()); pl=float(prev.low.min()); pc=float(prev.iloc[-1].close)
@@ -61,29 +61,20 @@ def run_original_immediate(df, stop_rule='gann'):
         entry_i=None; side=None; entry=None
         for i in range(int(start[0]),len(day)):
             b=day.iloc[i]
-            # Production screenshot: entry is the exact first Gann trigger.
-            long_hit=float(b.high)>=buy
-            short_hit=float(b.low)<=sell
+            long_hit=float(b.high)>=buy; short_hit=float(b.low)<=sell
             if long_hit and short_hit:
-                # OHLC cannot reveal which happened first. Use candle direction as a deterministic tie-break,
-                # while recording it for audit visibility.
                 if float(b.close)>=float(b.open): entry_i=i; side='LONG'; entry=float(buy)
                 else: entry_i=i; side='SHORT'; entry=float(sell)
                 break
-            if long_hit:
-                entry_i=i; side='LONG'; entry=float(buy); break
-            if short_hit:
-                entry_i=i; side='SHORT'; entry=float(sell); break
+            if long_hit: entry_i=i; side='LONG'; entry=float(buy); break
+            if short_hit: entry_i=i; side='SHORT'; entry=float(sell); break
         if entry_i is None:
             stats['no_trigger']+=1; continue
         eb=day.iloc[entry_i]
         stop=float(sell if side=='LONG' else buy)
         target=float(entry+100 if side=='LONG' else entry-100)
-        exit_px=None; exit_time=None; reason=None; amb=False
-
-        # Most variants begin from the minute after entry. The entry-bar variant intentionally starts on entry minute.
+        exit_px=None; exit_time=None; reason=None; drop_trade=False
         first_exit_i=entry_i if stop_rule=='gann_touch_entrybar' else entry_i+1
-        five_close_cache={}
         for i in range(first_exit_i,len(day)):
             b=day.iloc[i]
             hit_target=float(b.high)>=target if side=='LONG' else float(b.low)<=target
@@ -91,7 +82,7 @@ def run_original_immediate(df, stop_rule='gann'):
                 hit_stop=float(b.low)<=stop if side=='LONG' else float(b.high)>=stop
             elif stop_rule=='gann_close_1m':
                 hit_stop=float(b.close)<=stop if side=='LONG' else float(b.close)>=stop
-            else: # gann_close_5m: evaluate stop only at completed 5-minute closes
+            else:
                 minute_of_day=int(b.date.hour)*60+int(b.date.minute)
                 slot=(minute_of_day-(9*60+15))//5
                 bucket_end=(9*60+15)+(slot+1)*5-1
@@ -99,12 +90,16 @@ def run_original_immediate(df, stop_rule='gann'):
                 if minute_of_day==bucket_end or i==len(day)-1:
                     hit_stop=float(b.close)<=stop if side=='LONG' else float(b.close)>=stop
             if hit_stop and hit_target:
-                stats['same_bar_both']+=1; amb=True; break
+                stats['same_bar_both']+=1
+                if same_bar_policy=='target_first': exit_px=target; exit_time=b.date; reason='TARGET'
+                elif same_bar_policy=='exclude': drop_trade=True
+                else: exit_px=stop; exit_time=b.date; reason='SL'
+                break
             if hit_stop:
                 exit_px=stop; exit_time=b.date; reason='SL'; break
             if hit_target:
                 exit_px=target; exit_time=b.date; reason='TARGET'; break
-        if amb: continue
+        if drop_trade: continue
         if exit_px is None:
             last=day.iloc[-1]; exit_px=float(last.close); exit_time=last.date; reason='EOD'
         pts=(exit_px-entry) if side=='LONG' else (entry-exit_px)
@@ -116,5 +111,5 @@ def run_original_immediate(df, stop_rule='gann'):
 
 def run_lab(df,cfg):
     if _is_original_immediate(cfg):
-        return run_original_immediate(df,cfg.get('stop_mode','gann'))
+        return run_original_immediate(df,cfg.get('stop_mode','gann'),cfg.get('same_bar_policy','stop_first'))
     return base.run_lab(df,cfg)
