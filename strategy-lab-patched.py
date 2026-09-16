@@ -35,6 +35,10 @@ def _is_opposite_recalc(cfg):
     )
 
 
+def _is_gap80_reverse(cfg):
+    return cfg.get('touch_side')=='gap80_reverse'
+
+
 def _augment(summary,trades):
     summary=dict(summary)
     summary['long_trades']=sum(t['side']=='LONG' for t in trades)
@@ -77,6 +81,104 @@ def _find_first_touch(day,res,sup,start_time=None,both=True,target_type=None):
                 if (hit_res and float(m.high)>=level) or (hit_sup and float(m.low)<=level):
                     return {'ambiguous':False,'type':typ,'level':float(level),'time':m.date}
     return None
+
+
+def _exit_fixed_gann(day, entry_i, side, entry, stop, target):
+    for i in range(entry_i+1,len(day)):
+        b=day.iloc[i]
+        hit_stop=float(b.low)<=stop if side=='LONG' else float(b.high)>=stop
+        hit_target=float(b.high)>=target if side=='LONG' else float(b.low)<=target
+        # Keep the 7750 convention: SL wins when SL and target share a minute.
+        if hit_stop:return float(stop),b.date,'SL',i
+        if hit_target:return float(target),b.date,'TARGET',i
+    last=day.iloc[-1]
+    return float(last.close),last.date,'EOD',len(day)-1
+
+
+def _five_minute_reverse(day, after_time, side, trigger):
+    """Return the last 1m row of the first completed 5m candle beyond trigger."""
+    work=day[day.date>after_time].copy()
+    if work.empty:return None
+    mins=work.date.dt.hour*60+work.date.dt.minute
+    work=work.assign(_slot=((mins-(9*60+15))//5).astype(int))
+    for slot,g in work.groupby('_slot',sort=True):
+        if slot<0 or len(g)<5:continue
+        last=g.iloc[-1]
+        close=float(last.close)
+        if side=='SHORT' and close<=trigger:return last
+        if side=='LONG' and close>=trigger:return last
+    return None
+
+
+def run_gap80_reverse(df):
+    """7750-style entry with an 80-point opening-gap filter and one 5m-close reversal."""
+    d=base.norm(df);d['session']=d.date.dt.date
+    sessions=[(k,v.drop(columns='session').reset_index(drop=True)) for k,v in d.groupby('session',sort=True)]
+    out=[];daily=[]
+    stats={'test_days':max(0,len(sessions)-1),'no_touch':0,'touch_ambiguous':0,'no_trigger':0,
+           'same_bar_both':0,'gap_long_blocked':0,'gap_short_blocked':0,
+           'engine':'gap80_reverse_5m_close'}
+    for di in range(1,len(sessions)):
+        sdate,day=sessions[di];_,prev=sessions[di-1]
+        ph=float(prev.high.max());pl=float(prev.low.min());pc=float(prev.iloc[-1].close)
+        w=(ph-pl)*.382;res=pc+w;sup=pc-w
+        first=_find_first_touch(day,res,sup)
+        if first is None:stats['no_touch']+=1;continue
+        if first.get('ambiguous'):stats['touch_ambiguous']+=1;continue
+        buy,sell=base.gann(first['level'],.125)
+        day_open=float(day.iloc[0].open)
+        allow_long=day_open<=res+80
+        allow_short=day_open>=sup-80
+        if not allow_long:stats['gap_long_blocked']+=1
+        if not allow_short:stats['gap_short_blocked']+=1
+
+        start=day.index[day.date>=first['time']]
+        entry_i=None;side=None;entry=None
+        if len(start):
+            for i in range(int(start[0]),len(day)):
+                b=day.iloc[i]
+                long_hit=allow_long and float(b.high)>=buy
+                short_hit=allow_short and float(b.low)<=sell
+                if long_hit and short_hit:
+                    side='LONG' if float(b.close)>=float(b.open) else 'SHORT'
+                    entry=float(buy if side=='LONG' else sell);entry_i=i;break
+                if long_hit:side='LONG';entry=float(buy);entry_i=i;break
+                if short_hit:side='SHORT';entry=float(sell);entry_i=i;break
+        if entry_i is None:stats['no_trigger']+=1;continue
+
+        stop=float(sell if side=='LONG' else buy)
+        target=float(entry+100 if side=='LONG' else entry-100)
+        ex,ext,reason,exit_i=_exit_fixed_gann(day,entry_i,side,entry,stop,target)
+        pts=(ex-entry) if side=='LONG' else (entry-ex)
+        t1={'date':str(sdate),'trade_no':1,'reference_phase':'GAP80_PRIMARY','first_touch':first['type'],
+            'touch_time':str(first['time']),'reference_price':round(float(first['level']),2),
+            'buy_above':buy,'sell_below':sell,'side':side,'entry_time':str(day.iloc[entry_i].date),
+            'entry':round(entry,2),'stop':round(stop,2),'target':round(target,2),'exit_time':str(ext),
+            'exit':round(ex,2),'reason':reason,'points':round(float(pts),2)}
+        out.append(t1);day_pts=pts;day_trades=1
+
+        # Exactly one reverse is available, and only after the primary Gann SL.
+        if reason=='SL':
+            reverse_side='SHORT' if side=='LONG' else 'LONG'
+            reverse_trigger=stop
+            confirm=_five_minute_reverse(day,ext,reverse_side,reverse_trigger)
+            if confirm is not None:
+                reverse_i=int(day.index[day.date==confirm.date][0])
+                reverse_entry=float(confirm.close)
+                reverse_stop=float(buy if reverse_side=='SHORT' else sell)
+                reverse_target=float(reverse_entry-100 if reverse_side=='SHORT' else reverse_entry+100)
+                rex,rext,rreason,_=_exit_fixed_gann(day,reverse_i,reverse_side,reverse_entry,reverse_stop,reverse_target)
+                rpts=(rex-reverse_entry) if reverse_side=='LONG' else (reverse_entry-rex)
+                t2={'date':str(sdate),'trade_no':2,'reference_phase':'SL_REVERSE_5M_CLOSE','first_touch':first['type'],
+                    'touch_time':str(first['time']),'reference_price':round(float(first['level']),2),
+                    'buy_above':buy,'sell_below':sell,'side':reverse_side,'entry_time':str(confirm.date),
+                    'entry':round(reverse_entry,2),'stop':round(reverse_stop,2),'target':round(reverse_target,2),
+                    'exit_time':str(rext),'exit':round(rex,2),'reason':rreason,'points':round(float(rpts),2)}
+                out.append(t2);day_pts+=rpts;day_trades+=1
+        daily.append({'date':str(sdate),'points':round(float(day_pts),2),'trades':day_trades})
+    summary=base._summary(out,stats)
+    summary['reverse_trades']=sum(t.get('reference_phase')=='SL_REVERSE_5M_CLOSE' for t in out)
+    return _augment(summary,out),out,daily,base._monthly(out)
 
 
 def _trade_from_reference(day,start_time,ref_type,ref_price,trade_no,phase):
@@ -237,6 +339,8 @@ def run_original_immediate(df, stop_rule='gann', same_bar_policy='stop_first'):
 
 
 def run_lab(df,cfg):
+    if _is_gap80_reverse(cfg):
+        return run_gap80_reverse(df)
     if _is_opposite_recalc(cfg):
         return run_opposite_wma_recalc(df)
     if _is_original_immediate(cfg):
