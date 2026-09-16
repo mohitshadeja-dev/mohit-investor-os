@@ -125,7 +125,9 @@ def run_same_day_sr(df,cfg):
     d=base.norm(df);d['session']=d.date.dt.date
     sessions=[(k,v.drop(columns='session').reset_index(drop=True)) for k,v in d.groupby('session',sort=True)]
     out=[];daily=[]
-    stats={'test_days':max(0,len(sessions)-1),'no_touch':0,'touch_ambiguous':0,'no_trigger':0,'same_bar_both':0,'engine':'same_day_sr_sequential'}
+    stats={'test_days':max(0,len(sessions)-1),'no_touch':0,'touch_ambiguous':0,'no_trigger':0,
+           'same_bar_both':0,'large_red_first_candle':0,'large_green_first_candle':0,
+           'engine':'same_day_sr_sequential'}
     wma=float(cfg.get('wma_factor',.382)); confirm=int(cfg.get('confirm_interval',1) or 1)
     sh,sm=map(int,str(cfg.get('start_time','09:15')).split(':'));eh,em=map(int,str(cfg.get('end_time','15:30')).split(':'))
     maxtr=cfg.get('max_trades_per_day');maxtr=int(maxtr) if maxtr not in (None,'',0) else 999
@@ -136,6 +138,12 @@ def run_same_day_sr(df,cfg):
         sdate,day=sessions[di];_,prev=sessions[di-1]
         day=day[(day.date.dt.time>=time(sh,sm))&(day.date.dt.time<=time(eh,em))].reset_index(drop=True)
         if day.empty:continue
+        first5=day.iloc[:5]
+        first_body=(float(first5.iloc[-1].close)-float(first5.iloc[0].open)) if len(first5)==5 else 0
+        block_long=first_body < -120
+        block_short=first_body > 120
+        if block_long:stats['large_red_first_candle']+=1
+        if block_short:stats['large_green_first_candle']+=1
         ph=float(prev.high.max());pl=float(prev.low.min());pc=float(prev.iloc[-1].close)
         res=pc+(ph-pl)*wma;sup=pc-(ph-pl)*wma
         refs={
@@ -194,6 +202,11 @@ def run_same_day_sr(df,cfg):
                 if r['touch'] is None:continue
                 if r['touch']>cursor:continue
                 side='LONG' if typ=='RESISTANCE' else 'SHORT'
+                # A >120-point red first 5m candle suppresses Resistance LONG;
+                # a >120-point green first 5m candle suppresses Support SHORT.
+                # The opposite WMA reference remains live and can become trade #1.
+                if block_long and side=='LONG':continue
+                if block_short and side=='SHORT':continue
                 if direction=='long' and side!='LONG':continue
                 if direction=='short' and side!='SHORT':continue
                 g=grids[typ];trigger=g['buy'] if side=='LONG' else g['sell']
