@@ -34,6 +34,24 @@ def _first_close_break(day,resistance,support):
         if c<=support:return {'type':'SUPPORT','level':float(support),'time':b.date,'close':c}
     return None
 
+def _run_leg_same_day(side,entry,stop,target,day,start_time,leg):
+    bars=_bars5(day); bars=bars[bars.date>start_time].reset_index(drop=True)
+    if len(bars):
+        last=bars.iloc[-1]; ex=float(last.close); ext=last.date
+    else:
+        ex=float(entry); ext=start_time
+    reason='DAY_EOD'
+    for _,bar in bars.iterrows():
+        c=float(bar.close)
+        hit_sl=c<=stop if side=='LONG' else c>=stop
+        hit_t=c>=target if side=='LONG' else c<=target
+        if hit_sl:
+            ex=c; ext=bar.date; reason='SL'; break
+        if hit_t:
+            ex=c; ext=bar.date; reason='TARGET'; break
+    pts=(ex-entry) if side=='LONG' else (entry-ex)
+    return {'leg':leg,'side':side,'entry':float(entry),'stop':float(stop),'target':float(target),'exit':float(ex),'exit_time':ext,'reason':reason,'points':float(pts)}
+
 def _summary(trades,weeks,skipped_gap,no_setup,blocked_tuesday,blocked_fib):
     pts=[float(t['points']) for t in trades]; wins=[p for p in pts if p>0]; losses=[p for p in pts if p<0]
     eq=peak=dd=0
@@ -44,62 +62,27 @@ def _summary(trades,weeks,skipped_gap,no_setup,blocked_tuesday,blocked_fib):
         'weeks':weeks,'traded_weeks':len({t['week'] for t in primary}),'trades':len(trades),'primary_trades':len(primary),'reverse_trades':len(reverse),
         'wins':len(wins),'losses':len(losses),'win_rate':round(100*len(wins)/len(trades),2) if trades else 0,
         'total_points':round(sum(pts),2),'avg_points':round(sum(pts)/len(trades),2) if trades else 0,
-        'targets':sum(t['reason']=='TARGET' for t in trades),'stops':sum(t['reason']=='SL' for t in trades),
-        'friday_exits':sum(t['reason']=='FRIDAY_EOD' for t in trades),'max_drawdown_points':round(dd,2),
-        'skipped_gap_days':skipped_gap,'no_setup_days':no_setup,'blocked_by_tuesday_range':blocked_tuesday,'blocked_by_fibonacci':blocked_fib,
+        'targets':sum(t['reason']=='TARGET' for t in trades),'stops':sum(t['reason']=='SL' for t in trades),'day_eod_exits':sum(t['reason']=='DAY_EOD' for t in trades),
+        'max_drawdown_points':round(dd,2),'skipped_gap_days':skipped_gap,'no_setup_days':no_setup,
+        'blocked_by_tuesday_range':blocked_tuesday,'blocked_by_fibonacci':blocked_fib,
         'wednesday_trades':sum(t['trade_day']=='WED' and t.get('leg','PRIMARY')=='PRIMARY' for t in trades),
         'thursday_trades':sum(t['trade_day']=='THU' and t.get('leg','PRIMARY')=='PRIMARY' for t in trades),
         'friday_trades':sum(t['trade_day']=='FRI' and t.get('leg','PRIMARY')=='PRIMARY' for t in trades),
         'long_points':round(sum(t['points'] for t in trades if t['side']=='LONG'),2),'short_points':round(sum(t['points'] for t in trades if t['side']=='SHORT'),2),
         'primary_points':round(sum(t['points'] for t in primary),2),'reverse_points':round(sum(t['points'] for t in reverse),2),
-        'overnight_carries':sum(t.get('carried_overnight',False) for t in trades),
+        'overnight_carries':0,
     }
 
-def _future_5m(wdates,sessions,start_date,start_time):
-    out=[]
-    for dte in wdates:
-        wdnum=pd.Timestamp(dte).weekday()
-        if wdnum>4 or dte<start_date: continue
-        bday=_bars5(sessions[dte])
-        if dte==start_date:bday=bday[bday.date>start_time]
-        for _,bar in bday.iterrows():out.append((dte,bar))
-    return out
-
-def _run_leg(side,entry,stop,target,start_date,start_time,wdates,sessions,leg):
-    bars=_future_5m(wdates,sessions,start_date,start_time)
-    if bars:
-        last_date,last_bar=bars[-1]; ex=float(last_bar.close); ext=last_bar.date; exit_date=last_date
-    else:
-        ex=float(entry); ext=start_time; exit_date=start_date
-    reason='FRIDAY_EOD'; stop_bar=None
-    for dte,bar in bars:
-        c=float(bar.close)
-        hit_sl=c<=stop if side=='LONG' else c>=stop
-        hit_t=c>=target if side=='LONG' else c<=target
-        if hit_sl:
-            ex=c; ext=bar.date; exit_date=dte; reason='SL'; stop_bar=bar; break
-        if hit_t:
-            ex=c; ext=bar.date; exit_date=dte; reason='TARGET'; break
-    pts=(ex-entry) if side=='LONG' else (entry-ex)
-    return {'leg':leg,'side':side,'entry':float(entry),'stop':float(stop),'target':float(target),'exit':float(ex),'exit_time':ext,'exit_date':exit_date,'reason':reason,'points':float(pts),'stop_bar':stop_bar}
-
 def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_target_points=30.0,same_bar_policy='stop_first'):
-    """Weekly WMA-Gann, pure 5-minute closing basis.
+    """Weekly WMA-Gann. All signals/exits use completed 5-minute closes. No overnight carry.
 
-    Primary setup:
-      Tue anchor -> Wed, otherwise Thu, otherwise Fri.
-      BUY: 5m close >= Gann Buy, > Tue High, and > previous-day Fib 0.382.
-      SELL: 5m close <= Gann Sell, < Tue Low, and < previous-day Fib 0.618.
-      Previous-day Fib is calculated from Low -> High of the immediate reference session.
-      Primary target = 100 points; SL is opposite Gann level.
-      Carry overnight; force exit Friday final 5m close.
-
-    Reverse rule:
-      If PRIMARY SL is confirmed by a 5m close, immediately reverse at that confirming close.
-      Long SL -> reverse SHORT, SL = original Buy Above, target = 100 points.
-      Short SL -> reverse LONG, SL = original Sell Below, target = 100 points.
-      Reverse can carry overnight and also exits by Friday close if still open.
-      Maximum one reverse leg; no repeated flip-flopping.
+    Wed uses Tue H/L/C. If no valid primary trade Wed, Thu recalculates from Wed; if still none, Fri recalculates from Thu.
+    BUY requires 5m close >= Gann Buy, > Tuesday High, and > previous-day Fib 0.382.
+    SELL requires 5m close <= Gann Sell, < Tuesday Low, and < previous-day Fib 0.618.
+    Primary target = 100 points. Opposite Gann boundary is SL, both on 5m closing basis.
+    If primary SL occurs, take one reverse trade at that same confirming 5m close, target 100, opposite Gann SL.
+    Primary and reverse are intraday only. If target/SL is not hit, exit at that day's final 5m close.
+    Maximum one primary setup per week and one reverse leg only.
     """
     d=_norm(df); d['session']=d.date.dt.date
     sessions={k:v.drop(columns='session').reset_index(drop=True) for k,v in d.groupby('session',sort=True)}
@@ -121,8 +104,7 @@ def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_ta
             if not prevs:continue
             ref=max(prevs); prev=sessions[ref]; day=sessions[cand]
             ph=float(prev.high.max()); pl=float(prev.low.min()); pc=float(prev.iloc[-1].close)
-            fib382,fib618=_fib_levels(pl,ph)
-            wma=(ph-pl)*float(wma_factor); resistance=pc+wma; support=pc-wma
+            fib382,fib618=_fib_levels(pl,ph); wma=(ph-pl)*float(wma_factor); resistance=pc+wma; support=pc-wma
             touch=_first_close_break(day,resistance,support)
             rec={'week':f'{wk[0]}-W{wk[1]:02d}','trade_day':label,'date':str(cand),'reference_date':str(ref),'tuesday_date':str(anchor),
                  'tuesday_high':round(tuesday_high,2),'tuesday_low':round(tuesday_low,2),'ref_high':round(ph,2),'ref_low':round(pl,2),
@@ -137,39 +119,31 @@ def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_ta
             entrybar=None; side=None; saw_gann=False; saw_tuesday_ok=False
             for _,b in b5.iterrows():
                 c=float(b.close); lg=c>=buy; sg=c<=sell
-                long_tue=c>tuesday_high; short_tue=c<tuesday_low
-                long_fib=c>fib382; short_fib=c<fib618
+                long_tue=c>tuesday_high; short_tue=c<tuesday_low; long_fib=c>fib382; short_fib=c<fib618
                 if lg and long_tue and long_fib:entrybar=b; side='LONG'; break
                 if sg and short_tue and short_fib:entrybar=b; side='SHORT'; break
                 if lg or sg:saw_gann=True
                 if (lg and long_tue) or (sg and short_tue):saw_tuesday_ok=True
             if side is None:
-                if saw_tuesday_ok:
-                    blocked_fib+=1; rec['status']='BLOCKED_BY_PREVIOUS_DAY_FIB'
-                elif saw_gann:
-                    blocked_tuesday+=1; rec['status']='BLOCKED_BY_TUESDAY_HIGH_LOW'
-                else:
-                    no_setup+=1; rec['status']='NO_5M_CLOSE_GANN_TRIGGER'
+                if saw_tuesday_ok:blocked_fib+=1; rec['status']='BLOCKED_BY_PREVIOUS_DAY_FIB'
+                elif saw_gann:blocked_tuesday+=1; rec['status']='BLOCKED_BY_TUESDAY_HIGH_LOW'
+                else:no_setup+=1; rec['status']='NO_5M_CLOSE_GANN_TRIGGER'
                 attempts.append(rec); continue
 
             entry=float(entrybar.close); stop=float(sell if side=='LONG' else buy); target=float(entry+target_points if side=='LONG' else entry-target_points)
-            leg1=_run_leg(side,entry,stop,target,cand,entrybar.date,wdates,sessions,'PRIMARY')
-            carried=pd.Timestamp(leg1['exit_date']).date()>pd.Timestamp(cand).date()
+            leg1=_run_leg_same_day(side,entry,stop,target,day,entrybar.date,'PRIMARY')
             t1={**rec,'status':'TRADE','leg':'PRIMARY','side':side,'touch_time':str(touch['time']),'entry_date':str(cand),'entry_time':str(entrybar.date),
-                'entry':round(entry,2),'stop':round(stop,2),'target':round(target,2),'exit_date':str(leg1['exit_date']),'exit_time':str(leg1['exit_time']),
-                'exit':round(leg1['exit'],2),'reason':leg1['reason'],'points':round(leg1['points'],2),'carried_overnight':bool(carried)}
+                'entry':round(entry,2),'stop':round(stop,2),'target':round(target,2),'exit_date':str(cand),'exit_time':str(leg1['exit_time']),
+                'exit':round(leg1['exit'],2),'reason':leg1['reason'],'points':round(leg1['points'],2),'carried_overnight':False}
             trades.append(t1); attempts.append(t1); primary_done=True
 
             if leg1['reason']=='SL':
-                rev_side='SHORT' if side=='LONG' else 'LONG'
-                rev_entry=float(leg1['exit'])
-                rev_stop=float(buy if rev_side=='SHORT' else sell)
-                rev_target=float(rev_entry-100 if rev_side=='SHORT' else rev_entry+100)
-                leg2=_run_leg(rev_side,rev_entry,rev_stop,rev_target,leg1['exit_date'],leg1['exit_time'],wdates,sessions,'REVERSE')
-                rev_carried=pd.Timestamp(leg2['exit_date']).date()>pd.Timestamp(leg1['exit_date']).date()
-                t2={**rec,'status':'REVERSE_TRADE','leg':'REVERSE','side':rev_side,'touch_time':str(touch['time']),'entry_date':str(leg1['exit_date']),
+                rev_side='SHORT' if side=='LONG' else 'LONG'; rev_entry=float(leg1['exit'])
+                rev_stop=float(buy if rev_side=='SHORT' else sell); rev_target=float(rev_entry-100 if rev_side=='SHORT' else rev_entry+100)
+                leg2=_run_leg_same_day(rev_side,rev_entry,rev_stop,rev_target,day,leg1['exit_time'],'REVERSE')
+                t2={**rec,'status':'REVERSE_TRADE','leg':'REVERSE','side':rev_side,'touch_time':str(touch['time']),'entry_date':str(cand),
                     'entry_time':str(leg1['exit_time']),'entry':round(rev_entry,2),'stop':round(rev_stop,2),'target':round(rev_target,2),
-                    'exit_date':str(leg2['exit_date']),'exit_time':str(leg2['exit_time']),'exit':round(leg2['exit'],2),'reason':leg2['reason'],
-                    'points':round(leg2['points'],2),'carried_overnight':bool(rev_carried),'reversed_from':side}
+                    'exit_date':str(cand),'exit_time':str(leg2['exit_time']),'exit':round(leg2['exit'],2),'reason':leg2['reason'],
+                    'points':round(leg2['points'],2),'carried_overnight':False,'reversed_from':side}
                 trades.append(t2); attempts.append(t2)
     return _summary(trades,week_count,skipped_gap,no_setup,blocked_tuesday,blocked_fib),trades,attempts
