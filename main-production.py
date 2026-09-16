@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os, sqlite3, json, csv, io, urllib.request, threading, uuid, time as pytime
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, time as dtime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
@@ -14,9 +15,12 @@ from .kite_service import login_url, exchange_request_token, profile, fetch_minu
 from .strategy import run_backtest, _norm, _daily_hlc, _first_touch_5m, gann_levels
 from .strategy_lab import run_lab
 from .options_backtest import run_options_backtest
+from .live_execution import LiveOrderError, build_ticket, place_spread, close_spread, order_book
+from .live_signal_7575 import scan_live_7575
 
 ROOT=Path(__file__).resolve().parent
 DB=Path(os.getenv('APP_DB_PATH','./mohit_os.db'))
+IST=ZoneInfo('Asia/Kolkata')
 app=FastAPI(title='Mohit Investor OS — Strategy Lab',version='3.0.0')
 app.mount('/static',StaticFiles(directory=ROOT/'static'),name='static')
 
@@ -35,6 +39,17 @@ class DhanSettings(BaseModel): client_id:str=Field(min_length=3); access_token:s
 class OptionsBacktestRequest(BaseModel):
     from_date:date=date(2025,9,5); to_date:date=date(2026,9,15)
     quantity:int=Field(default=1300,gt=0)
+class LiveTicketRequest(BaseModel):
+    signal:str
+    quantity:int=Field(default=1300,gt=0)
+    sell_delta:float=Field(default=.70,gt=.5,lt=1)
+    buy_delta:float=Field(default=.30,gt=0,lt=.5)
+class LivePlaceRequest(LiveTicketRequest):
+    ticket_id:str=Field(min_length=8,max_length=80)
+    confirmation:str
+class LiveCloseRequest(BaseModel):
+    spread_id:str=Field(min_length=8,max_length=80)
+    confirmation:str
 
 INSTRUMENT_CACHE={'ts':0,'rows':[]}; JOBS={}
 
@@ -280,7 +295,46 @@ def scan_live(df:pd.DataFrame,target_points:float=100.0):
 @app.get('/api/live/gann')
 def live_gann(instrument_token:int=int(os.getenv('NIFTY_INSTRUMENT_TOKEN','256265')),target_points:float=100.0):
     try:
-        today=date.today();df=fetch_minutes(instrument_token,today-timedelta(days=10),today);return scan_live(df,target_points)
+        now=datetime.now(IST);today=now.date();df=fetch_minutes(instrument_token,today-timedelta(days=10),today);state=scan_live_7575(df)
+        if state.get('date')!=str(today):return {**state,'state':'MARKET_CLOSED','message':'No current-session candle is available','current_trade':None}
+        if now.weekday()>4 or not (dtime(9,15)<=now.time()<=dtime(15,30)):
+            return {**state,'state':'MARKET_CLOSED','message':'Live execution is available only during NSE market hours','current_trade':None}
+        return state
     except Exception as e:raise HTTPException(400,str(e))
 @app.get('/api/journal')
 def journal():return journal_rows()
+
+@app.post('/api/live/options/ticket')
+def live_options_ticket(req:LiveTicketRequest):
+    """Create a read-only manual order ticket. This endpoint never places an order."""
+    try:
+        now=datetime.now(IST);today=now.date()
+        if now.weekday()>4 or not (dtime(9,15)<=now.time()<=dtime(15,25)):
+            raise LiveOrderError('Order tickets are available only from 09:15 to 15:25 IST')
+        df=fetch_minutes(int(os.getenv('NIFTY_INSTRUMENT_TOKEN','256265')),today-timedelta(days=10),today)
+        state=scan_live_7575(df);trade=state.get('current_trade')
+        if state.get('date')!=str(today) or not trade or trade.get('status')!='OPEN':
+            raise LiveOrderError('There is no confirmed open Gann signal for the current session')
+        if trade.get('side')!=req.signal.strip().upper():
+            raise LiveOrderError('The requested side does not match the current confirmed Gann signal')
+        return build_ticket(client(),req.signal,req.quantity,req.sell_delta,req.buy_delta)
+    except LiveOrderError as e:raise HTTPException(400,str(e))
+    except Exception as e:raise HTTPException(400,f'Could not prepare option spread: {e}')
+
+@app.post('/api/live/options/place')
+def live_options_place(req:LivePlaceRequest):
+    """Place the exact previewed ticket only after an explicit UI confirmation."""
+    try:return place_spread(client(),req.ticket_id,req.signal,req.quantity,req.sell_delta,req.buy_delta,req.confirmation)
+    except LiveOrderError as e:raise HTTPException(400,str(e))
+    except Exception as e:raise HTTPException(400,f'Order placement failed: {e}')
+
+@app.post('/api/live/options/close')
+def live_options_close(req:LiveCloseRequest):
+    try:return close_spread(client(),req.spread_id,req.confirmation)
+    except LiveOrderError as e:raise HTTPException(400,str(e))
+    except Exception as e:raise HTTPException(400,f'Exit failed: {e}')
+
+@app.get('/api/live/options/orders')
+def live_options_orders():
+    try:return order_book(client())
+    except Exception as e:raise HTTPException(400,str(e))

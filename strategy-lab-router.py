@@ -3,6 +3,7 @@ from datetime import time
 import pandas as pd
 from . import strategy_lab_base as base
 from . import strategy_lab_patched_impl as legacy
+from .same_day_sr import run_same_day_sr
 
 
 def _bars(df, minutes):
