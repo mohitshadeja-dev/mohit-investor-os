@@ -30,7 +30,7 @@ def _first_touch(day,resistance,support):
         if hr or hs:return {'ambiguous':False,'type':'RESISTANCE' if hr else 'SUPPORT','level':float(resistance if hr else support),'time':b.date}
     return None
 
-def _summary(trades,weeks,skipped_gap,no_setup,ambiguous):
+def _summary(trades,weeks,skipped_gap,no_setup,ambiguous,blocked_tuesday):
     pts=[float(t['points']) for t in trades]; wins=[p for p in pts if p>0]; losses=[p for p in pts if p<0]
     eq=peak=dd=0
     for p in pts:
@@ -42,6 +42,7 @@ def _summary(trades,weeks,skipped_gap,no_setup,ambiguous):
         'targets':sum(t['reason']=='TARGET' for t in trades),'stops':sum(t['reason']=='SL' for t in trades),
         'eod':sum(t['reason']=='EOD' for t in trades),'max_drawdown_points':round(dd,2),
         'skipped_gap_days':skipped_gap,'no_setup_days':no_setup,'ambiguous_touch_days':ambiguous,
+        'blocked_by_tuesday_range':blocked_tuesday,
         'wednesday_trades':sum(t['trade_day']=='WED' for t in trades),'thursday_trades':sum(t['trade_day']=='THU' for t in trades),'friday_trades':sum(t['trade_day']=='FRI' for t in trades),
         'long_points':round(sum(t['points'] for t in trades if t['side']=='LONG'),2),
         'short_points':round(sum(t['points'] for t in trades if t['side']=='SHORT'),2),
@@ -54,45 +55,49 @@ def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_ta
       Tuesday expiry anchor -> attempt Wednesday using Tuesday H/L/C.
       If no valid trade Wednesday, recalculate from Wednesday -> attempt Thursday.
       If still no trade, recalculate from Thursday -> attempt Friday.
-      Entry: first 5-minute candle CLOSE beyond Gann Buy/Sell trigger after first WMA S/R touch.
-      Target: 100 points from actual 5-minute close entry. SL: opposite Gann boundary.
-      Maximum one completed/open trade for the whole week.
 
-    Gap/near-target filter operationalization:
-      After the first touch establishes Gann levels, skip the day when the opening price has already
-      travelled to within `gap_near_target_points` of the theoretical 100-point target from a Gann trigger.
-      Long skip: open >= BuyAbove + (target-gap_buffer).
-      Short skip: open <= SellBelow - (target-gap_buffer).
+    Entry confirmation:
+      LONG only when a 5-minute candle CLOSES at/above the Gann Buy Above level
+      AND strictly above that week's Tuesday High.
+      SHORT only when a 5-minute candle CLOSES at/below the Gann Sell Below level
+      AND strictly below that week's Tuesday Low.
+      Tuesday High/Low remain the weekly directional gate even when Thu/Fri Gann levels
+      are recalculated from Wed/Thu.
+
+    Target: 100 points from actual 5-minute close entry. SL: opposite Gann boundary.
+    Maximum one trade for the whole week.
     """
     d=_norm(df); d['session']=d.date.dt.date
     sessions={k:v.drop(columns='session').reset_index(drop=True) for k,v in d.groupby('session',sort=True)}
     dates=sorted(sessions)
-    # group by ISO year/week
     groups={}
     for sd in dates:
         iso=pd.Timestamp(sd).isocalendar(); groups.setdefault((int(iso.year),int(iso.week)),[]).append(sd)
-    trades=[]; attempts=[]; skipped_gap=no_setup=ambiguous=0; week_count=0
+    trades=[]; attempts=[]; skipped_gap=no_setup=ambiguous=blocked_tuesday=0; week_count=0
     for wk,wdates in sorted(groups.items()):
-        # need an expiry anchor on/before Tuesday and at least one Wed-Fri candidate
         week_count+=1
         bywd={pd.Timestamp(x).weekday():x for x in wdates}
-        # Tuesday=1. If Tuesday holiday, use latest available day Monday/Tuesday in that week.
+        # Prefer actual Tuesday. If Tuesday is a market holiday, use the latest Mon/Tue session as expiry anchor proxy.
         anchor_candidates=[x for x in wdates if pd.Timestamp(x).weekday()<=1]
         if not anchor_candidates: continue
         anchor=max(anchor_candidates)
+        anchor_day=sessions[anchor]
+        tuesday_high=float(anchor_day.high.max())
+        tuesday_low=float(anchor_day.low.min())
         traded=False
         for wd,label in ((2,'WED'),(3,'THU'),(4,'FRI')):
             if traded: break
             cand=bywd.get(wd)
             if cand is None: continue
-            # reference is immediate prior trading session before candidate, so Thu uses Wed; Fri uses Thu.
             prevs=[x for x in dates if x<cand]
             if not prevs: continue
             ref=max(prevs); prev=sessions[ref]; day=sessions[cand]
             ph=float(prev.high.max()); pl=float(prev.low.min()); pc=float(prev.iloc[-1].close)
             wma=(ph-pl)*float(wma_factor); resistance=pc+wma; support=pc-wma
             touch=_first_touch(day,resistance,support)
-            rec={'week':f'{wk[0]}-W{wk[1]:02d}','trade_day':label,'date':str(cand),'reference_date':str(ref),'support':round(support,2),'resistance':round(resistance,2)}
+            rec={'week':f'{wk[0]}-W{wk[1]:02d}','trade_day':label,'date':str(cand),'reference_date':str(ref),
+                 'tuesday_date':str(anchor),'tuesday_high':round(tuesday_high,2),'tuesday_low':round(tuesday_low,2),
+                 'support':round(support,2),'resistance':round(resistance,2)}
             if touch is None:
                 no_setup+=1; rec['status']='NO_TOUCH'; attempts.append(rec); continue
             if touch.get('ambiguous'):
@@ -103,15 +108,28 @@ def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_ta
             if near_long or near_short:
                 skipped_gap+=1; rec.update({'status':'GAP_NEAR_TARGET_SKIP','open':round(op,2)}); attempts.append(rec); continue
             b5=_bars5(day); b5=b5[b5.date>=touch['time']].reset_index(drop=True)
-            entrybar=None; side=None
+            entrybar=None; side=None; saw_gann_without_tuesday=False
             for _,b in b5.iterrows():
                 c=float(b.close)
-                if c>=buy: entrybar=b; side='LONG'; break
-                if c<=sell: entrybar=b; side='SHORT'; break
+                long_gann=c>=buy
+                short_gann=c<=sell
+                long_ok=long_gann and c>tuesday_high
+                short_ok=short_gann and c<tuesday_low
+                if long_ok:
+                    entrybar=b; side='LONG'; break
+                if short_ok:
+                    entrybar=b; side='SHORT'; break
+                if long_gann or short_gann:
+                    saw_gann_without_tuesday=True
             if side is None:
-                no_setup+=1; rec['status']='NO_5M_CLOSE_TRIGGER'; attempts.append(rec); continue
+                if saw_gann_without_tuesday:
+                    blocked_tuesday+=1
+                    rec['status']='BLOCKED_BY_TUESDAY_HIGH_LOW'
+                else:
+                    no_setup+=1
+                    rec['status']='NO_5M_CLOSE_TRIGGER'
+                attempts.append(rec); continue
             entry=float(entrybar.close); stop=float(sell if side=='LONG' else buy); target=float(entry+target_points if side=='LONG' else entry-target_points)
-            # entry occurs at 5m close; use subsequent 1m candles for target/SL ordering.
             minute=day[day.date>entrybar.date].reset_index(drop=True)
             ex=float(day.iloc[-1].close); ext=day.iloc[-1].date; reason='EOD'
             for _,m in minute.iterrows():
@@ -126,4 +144,4 @@ def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_ta
             pts=(ex-entry) if side=='LONG' else (entry-ex)
             tr={**rec,'status':'TRADE','side':side,'touch_time':str(touch['time']),'entry_time':str(entrybar.date),'entry':round(entry,2),'stop':round(stop,2),'target':round(target,2),'exit_time':str(ext),'exit':round(float(ex),2),'reason':reason,'points':round(float(pts),2),'open':round(op,2)}
             trades.append(tr); attempts.append(tr); traded=True
-    return _summary(trades,week_count,skipped_gap,no_setup,ambiguous),trades,attempts
+    return _summary(trades,week_count,skipped_gap,no_setup,ambiguous,blocked_tuesday),trades,attempts
