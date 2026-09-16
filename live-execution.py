@@ -188,22 +188,31 @@ def place_spread(kite, ticket_id: str, signal: str, quantity: int, sell_delta: f
         return spread
 
 
-def close_spread(kite, spread_id: str, confirmation: str) -> dict:
-    if confirmation.strip().upper() != "EXIT":
-        raise LiveOrderError('Type EXIT in the confirmation box')
+def close_spread_record(kite, spread: dict) -> dict:
     with LOCK:
-        spread = SPREADS.get(spread_id)
-        if not spread:
-            raise LiveOrderError("Spread was not found in this server session")
         if spread["status"] in {"EXIT_SENT", "CLOSED"}:
             raise LiveOrderError("Exit was already submitted")
         common = dict(variety=kite.VARIETY_REGULAR, exchange=kite.EXCHANGE_NFO, quantity=spread["quantity"],
                       product=kite.PRODUCT_MIS, order_type=kite.ORDER_TYPE_MARKET, validity=kite.VALIDITY_DAY)
-        # Remove the short exposure first; only then sell the protective hedge.
-        short_exit = kite.place_order(tradingsymbol=spread["short_leg"]["tradingsymbol"], transaction_type=kite.TRANSACTION_TYPE_BUY, tag="MIOEXIT", **common)
+        # Remove the short exposure and confirm that BUY fill before selling the hedge.
+        if spread["status"] == "ORDERS_SENT":
+            short_exit = kite.place_order(tradingsymbol=spread["short_leg"]["tradingsymbol"], transaction_type=kite.TRANSACTION_TYPE_BUY, tag="MIOEXIT", **common)
+            short_fill = _wait_complete(kite,short_exit)
+            spread.update({"status":"SHORT_CLOSED","short_exit_order_id":short_exit,"short_exit_price":short_fill.get("average_price")})
         hedge_exit = kite.place_order(tradingsymbol=spread["hedge_leg"]["tradingsymbol"], transaction_type=kite.TRANSACTION_TYPE_SELL, tag="MIOEXIT", **common)
-        spread.update({"status": "EXIT_SENT", "short_exit_order_id": short_exit, "hedge_exit_order_id": hedge_exit, "exit_sent_at": datetime.now(IST).isoformat()})
+        hedge_fill = _wait_complete(kite,hedge_exit)
+        spread.update({"status": "CLOSED", "hedge_exit_order_id": hedge_exit, "hedge_exit_price":hedge_fill.get("average_price"), "exit_sent_at": datetime.now(IST).isoformat()})
+        if spread.get("spread_id"):SPREADS[spread["spread_id"]]=spread
         return spread
+
+
+def close_spread(kite, spread_id: str, confirmation: str) -> dict:
+    if confirmation.strip().upper() != "EXIT":
+        raise LiveOrderError('Type EXIT in the confirmation box')
+    spread = SPREADS.get(spread_id)
+    if not spread:
+        raise LiveOrderError("Spread was not found in this server session")
+    return close_spread_record(kite,spread)
 
 
 def order_book(kite) -> dict:

@@ -28,16 +28,25 @@ class FakeKite:
     def orders(self):return self.placed
 
 def test_preview_never_places_and_hedge_goes_first():
-    k=FakeKite();ticket=m.build_ticket(k,'SHORT',1300,.70,.30)
+    k=FakeKite();ticket=m.build_ticket(k,'SHORT',650,.70,.30)
     assert ticket['option_type']=='CE' and not k.placed
-    placed=m.place_spread(k,ticket['ticket_id'],'SHORT',1300,.70,.30,'PLACE')
+    placed=m.place_spread(k,ticket['ticket_id'],'SHORT',650,.70,.30,'PLACE')
     assert placed['status']=='ORDERS_SENT'
     assert k.placed[0]['transaction_type']=='BUY'
     assert k.placed[1]['transaction_type']=='SELL'
 
 def test_long_uses_puts_and_quantity_must_match_lot():
-    k=FakeKite();ticket=m.build_ticket(k,'LONG',1300,.70,.30)
+    k=FakeKite();ticket=m.build_ticket(k,'LONG',650,.70,.30)
     assert ticket['option_type']=='PE'
     try:m.build_ticket(k,'LONG',1301,.70,.30)
     except m.LiveOrderError as e:assert 'multiple' in str(e)
     else:raise AssertionError('invalid quantity accepted')
+
+def test_exit_buys_short_first_then_sells_hedge():
+    k=FakeKite();ticket=m.build_ticket(k,'SHORT',650,.70,.30);spread=m.place_spread(k,ticket['ticket_id'],'SHORT',650,.70,.30,'PLACE')
+    m.close_spread_record(k,spread)
+    assert k.placed[2]['transaction_type']=='BUY'
+    assert k.placed[2]['tradingsymbol']==spread['short_leg']['tradingsymbol']
+    assert k.placed[3]['transaction_type']=='SELL'
+    assert k.placed[3]['tradingsymbol']==spread['hedge_leg']['tradingsymbol']
+    assert spread['status']=='CLOSED'

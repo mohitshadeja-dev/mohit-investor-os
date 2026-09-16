@@ -15,7 +15,7 @@ from .kite_service import login_url, exchange_request_token, profile, fetch_minu
 from .strategy import run_backtest, _norm, _daily_hlc, _first_touch_5m, gann_levels
 from .strategy_lab import run_lab
 from .options_backtest import run_options_backtest
-from .live_execution import LiveOrderError, build_ticket, place_spread, close_spread, order_book
+from .live_execution import LiveOrderError, build_ticket, place_spread, close_spread, close_spread_record, order_book
 from .live_signal_7575 import scan_live_7575
 
 ROOT=Path(__file__).resolve().parent
@@ -41,7 +41,7 @@ class OptionsBacktestRequest(BaseModel):
     quantity:int=Field(default=1300,gt=0)
 class LiveTicketRequest(BaseModel):
     signal:str
-    quantity:int=Field(default=1300,gt=0)
+    quantity:int=Field(default=650,gt=0)
     sell_delta:float=Field(default=.70,gt=.5,lt=1)
     buy_delta:float=Field(default=.30,gt=0,lt=.5)
 class LivePlaceRequest(LiveTicketRequest):
@@ -58,7 +58,15 @@ def jconn():
     c.execute('''CREATE TABLE IF NOT EXISTS journal(id INTEGER PRIMARY KEY AUTOINCREMENT,trade_key TEXT UNIQUE,trade_date TEXT,trade_no INTEGER,side TEXT,entry_time TEXT,entry REAL,stop REAL,target REAL,exit_time TEXT,exit REAL,reason TEXT,points REAL,status TEXT,notes TEXT DEFAULT '',updated_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS saved_backtests(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,symbol TEXT,config_json TEXT,summary_json TEXT,trades_json TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS option_data_cache(cache_key TEXT PRIMARY KEY,payload_json TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS live_spreads(spread_id TEXT PRIMARY KEY,signal_key TEXT UNIQUE,payload_json TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
     return c
+
+def save_live_spread(spread):
+    with jconn() as c:c.execute('''INSERT OR REPLACE INTO live_spreads(spread_id,signal_key,payload_json,status,updated_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP)''',(spread['spread_id'],spread.get('signal_key'),json.dumps(spread),spread.get('status','UNKNOWN')))
+
+def open_live_spreads():
+    with jconn() as c:rows=c.execute("SELECT payload_json FROM live_spreads WHERE status IN ('ORDERS_SENT','SHORT_CLOSED')").fetchall()
+    return [json.loads(r['payload_json']) for r in rows]
 
 def _instruments():
     if INSTRUMENT_CACHE['rows'] and pytime.time()-INSTRUMENT_CACHE['ts']<21600:return INSTRUMENT_CACHE['rows']
@@ -317,14 +325,17 @@ def live_options_ticket(req:LiveTicketRequest):
             raise LiveOrderError('There is no confirmed open Gann signal for the current session')
         if trade.get('side')!=req.signal.strip().upper():
             raise LiveOrderError('The requested side does not match the current confirmed Gann signal')
-        return build_ticket(client(),req.signal,req.quantity,req.sell_delta,req.buy_delta)
+        ticket=build_ticket(client(),req.signal,650,req.sell_delta,req.buy_delta)
+        ticket.update({'signal_key':f"{trade.get('date')}|{trade.get('trade_no')}|{trade.get('entry_time')}",'underlying_entry':trade.get('entry'),'underlying_stop':trade.get('stop'),'underlying_target':trade.get('target'),'underlying_trade_no':trade.get('trade_no'),'underlying_date':trade.get('date')})
+        return ticket
     except LiveOrderError as e:raise HTTPException(400,str(e))
     except Exception as e:raise HTTPException(400,f'Could not prepare option spread: {e}')
 
 @app.post('/api/live/options/place')
 def live_options_place(req:LivePlaceRequest):
     """Place the exact previewed ticket only after an explicit UI confirmation."""
-    try:return place_spread(client(),req.ticket_id,req.signal,req.quantity,req.sell_delta,req.buy_delta,req.confirmation)
+    try:
+        spread=place_spread(client(),req.ticket_id,req.signal,req.quantity,req.sell_delta,req.buy_delta,req.confirmation);save_live_spread(spread);return spread
     except LiveOrderError as e:raise HTTPException(400,str(e))
     except Exception as e:raise HTTPException(400,f'Order placement failed: {e}')
 
@@ -338,3 +349,29 @@ def live_options_close(req:LiveCloseRequest):
 def live_options_orders():
     try:return order_book(client())
     except Exception as e:raise HTTPException(400,str(e))
+
+def _auto_exit_worker():
+    """Watch NIFTY LTP each second and close persisted spreads at their 150-point target or SL."""
+    while True:
+        try:
+            now=datetime.now(IST)
+            if now.weekday()<5 and dtime(9,15)<=now.time()<=dtime(15,30):
+                spreads=open_live_spreads()
+                if spreads:
+                    kite=client();spot=float(kite.ltp(['NSE:NIFTY 50'])['NSE:NIFTY 50']['last_price'])
+                    for spread in spreads:
+                        if spread.get('underlying_date')!=str(now.date()):continue
+                        side=spread.get('signal');target=float(spread['underlying_target']);stop=float(spread['underlying_stop']);reason=spread.get('auto_exit_reason') if spread.get('status')=='SHORT_CLOSED' else None
+                        if reason is None and side=='LONG':reason='TARGET' if spot>=target else ('SL' if spot<=stop else None)
+                        elif reason is None and side=='SHORT':reason='TARGET' if spot<=target else ('SL' if spot>=stop else None)
+                        if reason:
+                            spread.update({'auto_exit_reason':reason,'underlying_exit':spot,'underlying_exit_time':now.isoformat()})
+                            try:save_live_spread(close_spread_record(kite,spread))
+                            except Exception as e:
+                                spread['last_exit_error']=str(e);save_live_spread(spread)
+        except Exception:pass
+        pytime.sleep(1)
+
+@app.on_event('startup')
+def start_live_exit_monitor():
+    threading.Thread(target=_auto_exit_worker,daemon=True,name='mio-live-auto-exit').start()
