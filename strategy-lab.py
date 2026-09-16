@@ -1,0 +1,108 @@
+from __future__ import annotations
+from datetime import time
+from math import floor, sqrt
+import pandas as pd
+
+IST='Asia/Kolkata'
+
+def norm(df):
+    d=df.copy(); d.columns=[str(c).lower() for c in d.columns]
+    d['date']=pd.to_datetime(d['date'],errors='coerce')
+    if d['date'].dt.tz is None: d['date']=d['date'].dt.tz_localize(IST)
+    else: d['date']=d['date'].dt.tz_convert(IST)
+    for c in ('open','high','low','close'): d[c]=pd.to_numeric(d[c],errors='coerce')
+    d=d.dropna(subset=['date','open','high','low','close']).sort_values('date')
+    lt=d.date.dt.time
+    return d[(lt>=time(9,15))&(lt<=time(15,30))].reset_index(drop=True)
+
+def gann(price,step=.125):
+    r=sqrt(float(price)); n=floor((r+1e-10)/step)
+    return round(((n+1)*step)**2,2), round((n*step)**2,2)
+
+def bars(day,minutes):
+    if int(minutes)<=1: return day.copy()
+    x=day.set_index('date')
+    return x.resample(f'{int(minutes)}min',origin='start_day',offset='15min').agg(open=('open','first'),high=('high','max'),low=('low','min'),close=('close','last')).dropna().reset_index()
+
+def first_touch(day,resistance,support,minutes=5,side_filter='both'):
+    b=bars(day,minutes)
+    for _,r in b.iterrows():
+        tr=float(r.high)>=resistance and side_filter in ('both','resistance')
+        ts=float(r.low)<=support and side_filter in ('both','support')
+        if tr and ts:return {'ambiguous':True,'time':r.date}
+        if tr or ts:return {'ambiguous':False,'type':'RESISTANCE' if tr else 'SUPPORT','level':float(resistance if tr else support),'time':r.date}
+    return None
+
+def _signal(bar,side,buy,sell,mode='close'):
+    if mode=='wick':
+        return float(bar.high)>=buy if side=='LONG' else float(bar.low)<=sell
+    return float(bar.close)>=buy if side=='LONG' else float(bar.close)<=sell
+
+def run_lab(df,cfg):
+    d=norm(df); d['session']=d.date.dt.date
+    sessions=[(k,v.drop(columns='session').reset_index(drop=True)) for k,v in d.groupby('session',sort=True)]
+    out=[]; daily=[]; stats={'test_days':max(0,len(sessions)-1),'no_touch':0,'touch_ambiguous':0,'no_trigger':0,'same_bar_both':0}
+    wma_factor=float(cfg.get('wma_factor',.382)); touch_int=int(cfg.get('touch_interval',5)); confirm_int=int(cfg.get('confirm_interval',1)); gstep=float(cfg.get('gann_step',.125))
+    target_mode=cfg.get('target_mode','points'); target_value=float(cfg.get('target_value',100)); stop_mode=cfg.get('stop_mode','gann'); stop_value=float(cfg.get('stop_value',0) or 0)
+    reentry=bool(cfg.get('reentry',True)); maxtr=cfg.get('max_trades_per_day'); maxtr=int(maxtr) if maxtr not in (None,'',0) else None
+    same=cfg.get('same_bar_policy','stop_first'); direction=cfg.get('direction','both'); entry_mode=cfg.get('entry_mode','close'); touch_side=cfg.get('touch_side','both')
+    cost=float(cfg.get('cost_points',0) or 0); slip=float(cfg.get('slippage_points',0) or 0)
+    st=cfg.get('start_time','09:15'); et=cfg.get('end_time','15:30')
+    sh,sm=map(int,st.split(':')); eh,em=map(int,et.split(':'))
+    for di in range(1,len(sessions)):
+        sdate,day=sessions[di]; _,prev=sessions[di-1]
+        day=day[(day.date.dt.time>=time(sh,sm))&(day.date.dt.time<=time(eh,em))].reset_index(drop=True)
+        if day.empty: continue
+        ph=float(prev.high.max()); pl=float(prev.low.min()); pc=float(prev.iloc[-1].close); wma=(ph-pl)*wma_factor; res=pc+wma; sup=pc-wma
+        touch=first_touch(day,res,sup,touch_int,touch_side)
+        if touch is None: stats['no_touch']+=1; continue
+        if touch.get('ambiguous'): stats['touch_ambiguous']+=1; continue
+        buy,sell=gann(touch['level'],gstep); sigbars=bars(day,confirm_int); sigbars=sigbars[sigbars.date>=touch['time']].reset_index(drop=True)
+        n=0; cursor_time=touch['time']; had=False; day_pts=0
+        while True:
+            if maxtr is not None and n>=maxtr: break
+            cand=sigbars[sigbars.date>=cursor_time]; entrybar=None; side=None
+            for _,b in cand.iterrows():
+                checks=[]
+                if direction in ('both','long'): checks.append('LONG')
+                if direction in ('both','short'): checks.append('SHORT')
+                for sd in checks:
+                    if _signal(b,sd,buy,sell,entry_mode): entrybar=b; side=sd; break
+                if side: break
+            if side is None:
+                if not had: stats['no_trigger']+=1
+                break
+            had=True; n+=1; entry=float(entrybar.close)+(slip if side=='LONG' else -slip)
+            if stop_mode=='gann': stop=sell if side=='LONG' else buy
+            elif stop_mode=='points': stop=entry-stop_value if side=='LONG' else entry+stop_value
+            else: stop=entry*(1-stop_value/100) if side=='LONG' else entry*(1+stop_value/100)
+            risk=abs(entry-stop)
+            if target_mode=='points': target=entry+target_value if side=='LONG' else entry-target_value
+            elif target_mode=='percent': target=entry*(1+target_value/100) if side=='LONG' else entry*(1-target_value/100)
+            else: target=entry+risk*target_value if side=='LONG' else entry-risk*target_value
+            minute=day[day.date>entrybar.date].reset_index(drop=True); reason='EOD'; ex=float(day.iloc[-1].close); ext=day.iloc[-1].date
+            for _,m in minute.iterrows():
+                hsl=float(m.low)<=stop if side=='LONG' else float(m.high)>=stop; ht=float(m.high)>=target if side=='LONG' else float(m.low)<=target
+                if hsl and ht:
+                    stats['same_bar_both']+=1
+                    if same=='exclude': reason='AMBIGUOUS'; ex=None; ext=m.date
+                    elif same=='target_first': reason='TARGET'; ex=target; ext=m.date
+                    else: reason='SL'; ex=stop; ext=m.date
+                    break
+                if hsl: reason='SL'; ex=stop; ext=m.date; break
+                if ht: reason='TARGET'; ex=target; ext=m.date; break
+            if reason!='AMBIGUOUS':
+                pts=((ex-entry) if side=='LONG' else (entry-ex))-cost
+                tr={'date':str(sdate),'trade_no':n,'first_touch':touch['type'],'touch_time':str(touch['time']),'reference_price':round(touch['level'],2),'buy_above':buy,'sell_below':sell,'side':side,'entry_time':str(entrybar.date),'entry':round(entry,2),'stop':round(stop,2),'target':round(target,2),'exit_time':str(ext),'exit':round(ex,2),'reason':reason,'points':round(pts,2)}
+                out.append(tr); day_pts+=pts
+            if not reentry or reason=='EOD' or ex is None: break
+            cursor_time=ext+pd.Timedelta(seconds=1)
+        daily.append({'date':str(sdate),'points':round(day_pts,2),'trades':n})
+    pts=[t['points'] for t in out]; wins=[p for p in pts if p>0]; losses=[p for p in pts if p<0]; total=sum(pts); grossp=sum(wins); grossl=abs(sum(losses)); eq=peak=dd=0; streak=cur=0
+    for p in pts:
+        eq+=p; peak=max(peak,eq); dd=max(dd,peak-eq); cur=cur+1 if p<0 else 0; streak=max(streak,cur)
+    longs=[t['points'] for t in out if t['side']=='LONG']; shorts=[t['points'] for t in out if t['side']=='SHORT']
+    monthly={}
+    for t in out: monthly[t['date'][:7]]=monthly.get(t['date'][:7],0)+t['points']
+    summary={**stats,'trades':len(out),'wins':len(wins),'losses':len(losses),'win_rate':round(100*len(wins)/len(out),2) if out else 0,'total_points':round(total,2),'gross_profit':round(grossp,2),'gross_loss':round(grossl,2),'profit_factor':round(grossp/grossl,2) if grossl else (999 if grossp else 0),'avg_points':round(total/len(out),2) if out else 0,'max_drawdown_points':round(dd,2),'max_losing_streak':streak,'targets':sum(t['reason']=='TARGET' for t in out),'stops':sum(t['reason']=='SL' for t in out),'eod':sum(t['reason']=='EOD' for t in out),'long_points':round(sum(longs),2),'short_points':round(sum(shorts),2),'best_trade':round(max(pts),2) if pts else 0,'worst_trade':round(min(pts),2) if pts else 0}
+    return summary,out,daily,[{'month':k,'points':round(v,2)} for k,v in sorted(monthly.items())]
