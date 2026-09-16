@@ -39,6 +39,10 @@ def _is_gap80_reverse(cfg):
     return cfg.get('touch_side')=='gap80_reverse'
 
 
+def _is_body120_reverse(cfg):
+    return cfg.get('touch_side')=='body120_reverse'
+
+
 def _augment(summary,trades):
     summary=dict(summary)
     summary['long_trades']=sum(t['side']=='LONG' for t in trades)
@@ -178,6 +182,77 @@ def run_gap80_reverse(df):
         daily.append({'date':str(sdate),'points':round(float(day_pts),2),'trades':day_trades})
     summary=base._summary(out,stats)
     summary['reverse_trades']=sum(t.get('reference_phase')=='SL_REVERSE_5M_CLOSE' for t in out)
+    return _augment(summary,out),out,daily,base._monthly(out)
+
+
+def run_body120_reverse(df):
+    """7750 reference variant filtered by the first completed 5m candle body."""
+    d=base.norm(df);d['session']=d.date.dt.date
+    sessions=[(k,v.drop(columns='session').reset_index(drop=True)) for k,v in d.groupby('session',sort=True)]
+    out=[];daily=[]
+    stats={'test_days':max(0,len(sessions)-1),'no_touch':0,'touch_ambiguous':0,'no_trigger':0,
+           'same_bar_both':0,'large_red_first_candle':0,'large_green_first_candle':0,
+           'reverse_trades':0,'engine':'body120_first_5m_gann_reverse'}
+    for di in range(1,len(sessions)):
+        sdate,day=sessions[di];_,prev=sessions[di-1]
+        if len(day)<5:continue
+        ph=float(prev.high.max());pl=float(prev.low.min());pc=float(prev.iloc[-1].close)
+        w=(ph-pl)*.382;res=pc+w;sup=pc-w
+        first=_find_first_touch(day,res,sup)
+        if first is None:stats['no_touch']+=1;continue
+        if first.get('ambiguous'):stats['touch_ambiguous']+=1;continue
+        buy,sell=base.gann(first['level'],.125)
+
+        first5=day.iloc[:5]
+        body=float(first5.iloc[-1].close)-float(first5.iloc[0].open)
+        block_long=body < -120
+        block_short=body > 120
+        if block_long:stats['large_red_first_candle']+=1
+        if block_short:stats['large_green_first_candle']+=1
+
+        # The filter is only known after the first five-minute candle closes,
+        # so entries start with the following one-minute candle.
+        start_i=5
+        entry_i=None;side=None;entry=None
+        for i in range(start_i,len(day)):
+            b=day.iloc[i]
+            long_hit=(not block_long) and float(b.high)>=buy
+            short_hit=(not block_short) and float(b.low)<=sell
+            if long_hit and short_hit:
+                side='LONG' if float(b.close)>=float(b.open) else 'SHORT'
+                entry=float(buy if side=='LONG' else sell);entry_i=i;break
+            if long_hit:side='LONG';entry=float(buy);entry_i=i;break
+            if short_hit:side='SHORT';entry=float(sell);entry_i=i;break
+        if entry_i is None:stats['no_trigger']+=1;continue
+
+        stop=float(sell if side=='LONG' else buy)
+        target=float(entry+100 if side=='LONG' else entry-100)
+        ex,ext,reason,exit_i=_exit_fixed_gann(day,entry_i,side,entry,stop,target)
+        pts=(ex-entry) if side=='LONG' else (entry-ex)
+        t1={'date':str(sdate),'trade_no':1,'reference_phase':'BODY120_PRIMARY','first_touch':first['type'],
+            'touch_time':str(first['time']),'reference_price':round(float(first['level']),2),
+            'buy_above':buy,'sell_below':sell,'side':side,'entry_time':str(day.iloc[entry_i].date),
+            'entry':round(entry,2),'stop':round(stop,2),'target':round(target,2),'exit_time':str(ext),
+            'exit':round(ex,2),'reason':reason,'points':round(float(pts),2)}
+        out.append(t1);day_pts=pts;day_trades=1
+
+        # If the taken trade hits its opposite Gann SL, reverse immediately at
+        # that level. Exactly one opposite trade is allowed.
+        if reason=='SL' and exit_i<len(day)-1:
+            reverse_side='SHORT' if side=='LONG' else 'LONG'
+            reverse_entry=float(stop)
+            reverse_stop=float(buy if reverse_side=='SHORT' else sell)
+            reverse_target=float(reverse_entry-100 if reverse_side=='SHORT' else reverse_entry+100)
+            rex,rext,rreason,_=_exit_fixed_gann(day,exit_i,reverse_side,reverse_entry,reverse_stop,reverse_target)
+            rpts=(rex-reverse_entry) if reverse_side=='LONG' else (reverse_entry-rex)
+            t2={'date':str(sdate),'trade_no':2,'reference_phase':'GANN_SL_REVERSE','first_touch':first['type'],
+                'touch_time':str(first['time']),'reference_price':round(float(first['level']),2),
+                'buy_above':buy,'sell_below':sell,'side':reverse_side,'entry_time':str(ext),
+                'entry':round(reverse_entry,2),'stop':round(reverse_stop,2),'target':round(reverse_target,2),
+                'exit_time':str(rext),'exit':round(rex,2),'reason':rreason,'points':round(float(rpts),2)}
+            out.append(t2);day_pts+=rpts;day_trades+=1;stats['reverse_trades']+=1
+        daily.append({'date':str(sdate),'points':round(float(day_pts),2),'trades':day_trades})
+    summary=base._summary(out,stats)
     return _augment(summary,out),out,daily,base._monthly(out)
 
 
@@ -339,6 +414,8 @@ def run_original_immediate(df, stop_rule='gann', same_bar_policy='stop_first'):
 
 
 def run_lab(df,cfg):
+    if _is_body120_reverse(cfg):
+        return run_body120_reverse(df)
     if _is_gap80_reverse(cfg):
         return run_gap80_reverse(df)
     if _is_opposite_recalc(cfg):
