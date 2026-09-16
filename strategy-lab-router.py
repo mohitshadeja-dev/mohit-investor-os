@@ -12,39 +12,23 @@ def _bars(df, minutes):
     return x.resample(f'{minutes}min',origin='start_day',offset='15min').agg(open=('open','first'),high=('high','max'),low=('low','min'),close=('close','last')).dropna().reset_index()
 
 
-def _first_wma_touch(day,res,sup,minutes,start_after=None,target_type=None):
-    work=day if start_after is None else day[day.date>start_after].reset_index(drop=True)
-    if work.empty:return None
-    if target_type in ('RESISTANCE','SUPPORT'):
-        level=res if target_type=='RESISTANCE' else sup
-        for _,m in work.iterrows():
-            if target_type=='RESISTANCE' and float(m.high)>=level:return {'type':'RESISTANCE','level':float(level),'time':m.date}
-            if target_type=='SUPPORT' and float(m.low)<=level:return {'type':'SUPPORT','level':float(level),'time':m.date}
-        return None
-    b=_bars(work,minutes)
-    for _,r in b.iterrows():
-        hr=float(r.high)>=res; hs=float(r.low)<=sup
-        if hr and hs:return {'ambiguous':True,'time':r.date}
-        if hr or hs:
-            typ='RESISTANCE' if hr else 'SUPPORT'; level=float(res if hr else sup)
-            end=r.date+pd.Timedelta(minutes=max(1,int(minutes)))
-            raw=work[(work.date>=r.date)&(work.date<end)]
-            tt=r.date
-            for _,m in raw.iterrows():
-                if (typ=='RESISTANCE' and float(m.high)>=level) or (typ=='SUPPORT' and float(m.low)<=level):tt=m.date;break
-            return {'ambiguous':False,'type':typ,'level':level,'time':tt}
+def _first_touch_time(day, level, kind):
+    for _,m in day.iterrows():
+        if kind=='RESISTANCE' and float(m.high)>=level:return m.date
+        if kind=='SUPPORT' and float(m.low)<=level:return m.date
     return None
 
 
-def _entry_signal(bar,side,buy,sell,mode):
+def _entry_hit(bar, side, trigger, mode):
     if mode in ('trigger','wick'):
-        return float(bar.high)>=buy if side=='LONG' else float(bar.low)<=sell
-    return float(bar.close)>=buy if side=='LONG' else float(bar.close)<=sell
+        return float(bar.high)>=trigger if side=='LONG' else float(bar.low)<=trigger
+    return float(bar.close)>=trigger if side=='LONG' else float(bar.close)<=trigger
 
 
 def _stop_price(side,entry,buy,sell,cfg):
     sm=cfg.get('stop_mode','gann'); sv=float(cfg.get('stop_value',0) or 0)
-    if sm=='gann':return float(sell if side=='LONG' else buy)
+    if sm in ('gann','gann_close_1m','gann_close_5m','gann_touch_entrybar'):
+        return float(sell if side=='LONG' else buy)
     if sm=='points':return float(entry-sv if side=='LONG' else entry+sv)
     return float(entry*(1-sv/100) if side=='LONG' else entry*(1+sv/100))
 
@@ -56,35 +40,24 @@ def _target_price(side,entry,stop,cfg):
     return float(entry+risk*tv if side=='LONG' else entry-risk*tv)
 
 
-def _trade(day,start_time,ref_type,ref_price,trade_no,phase,cfg):
-    gstep=float(cfg.get('gann_step',.125)); buy,sell=base.gann(ref_price,gstep)
-    confirm=int(cfg.get('confirm_interval',1) or 1); entry_mode=cfg.get('entry_mode','trigger'); direction=cfg.get('direction','both')
-    slip=float(cfg.get('slippage_points',0) or 0); cost=float(cfg.get('cost_points',0) or 0); same=cfg.get('same_bar_policy','stop_first')
-
-    # Fixed structural mapping for this strategy:
-    # Resistance reference -> BUY ABOVE only.
-    # Support reference -> SELL BELOW only.
-    side='LONG' if ref_type=='RESISTANCE' else 'SHORT'
-    if direction=='long' and side!='LONG':return None
-    if direction=='short' and side!='SHORT':return None
-
-    sig=_bars(day[day.date>=start_time].reset_index(drop=True),confirm)
-    entrybar=None
-    for _,b in sig.iterrows():
-        if _entry_signal(b,side,buy,sell,entry_mode):
-            entrybar=b;break
-    if entrybar is None:return None
-
-    if entry_mode=='trigger':entry=float(buy if side=='LONG' else sell)
-    else:entry=float(entrybar.close)+(slip if side=='LONG' else -slip)
-    stop=_stop_price(side,entry,buy,sell,cfg); target=_target_price(side,entry,stop,cfg)
-    ex=None; ext=None; reason=None
-    minute=day[day.date>entrybar.date].reset_index(drop=True)
-    for _,m in minute.iterrows():
-        hit_sl=float(m.low)<=stop if side=='LONG' else float(m.high)>=stop
+def _exit_trade(day, entry_time, side, entry, stop, target, cfg):
+    same=cfg.get('same_bar_policy','stop_first'); stop_mode=cfg.get('stop_mode','gann')
+    work=day[day.date>entry_time].reset_index(drop=True)
+    ex=None;ext=None;reason=None
+    for _,m in work.iterrows():
+        # Stop execution follows the selected stop style. Gann-close variants use closes;
+        # all other stop modes use intrabar price touch.
+        if stop_mode=='gann_close_1m':
+            hit_sl=float(m.close)<=stop if side=='LONG' else float(m.close)>=stop
+        elif stop_mode=='gann_close_5m':
+            # evaluated approximately on completed 5-minute boundaries
+            mod=(int(m.date.hour)*60+int(m.date.minute)-(9*60+15))%5
+            hit_sl=(mod==4) and (float(m.close)<=stop if side=='LONG' else float(m.close)>=stop)
+        else:
+            hit_sl=float(m.low)<=stop if side=='LONG' else float(m.high)>=stop
         hit_t=float(m.high)>=target if side=='LONG' else float(m.low)<=target
         if hit_sl and hit_t:
-            if same=='exclude':return {'ambiguous':True,'_exit_ts':m.date}
+            if same=='exclude':return None,m.date,'AMBIGUOUS'
             if same=='target_first':ex=target;reason='TARGET'
             else:ex=stop;reason='SL'
             ext=m.date;break
@@ -92,40 +65,155 @@ def _trade(day,start_time,ref_type,ref_price,trade_no,phase,cfg):
         if hit_t:ex=target;ext=m.date;reason='TARGET';break
     if ex is None:
         last=day.iloc[-1];ex=float(last.close);ext=last.date;reason='EOD'
-    pts=((ex-entry) if side=='LONG' else (entry-ex))-cost
-    return {'trade_no':trade_no,'reference_phase':phase,'first_touch':ref_type,'touch_time':str(start_time),'reference_price':round(float(ref_price),2),'buy_above':buy,'sell_below':sell,'side':side,'entry_time':str(entrybar.date),'entry':round(entry,2),'stop':round(stop,2),'target':round(target,2),'exit_time':str(ext),'exit':round(float(ex),2),'reason':reason,'points':round(float(pts),2),'_exit_ts':ext}
+    return float(ex),ext,reason
+
+
+def _confirm_reverse(day, after_time, side, trigger, confirm_interval):
+    """SL reversal requires a completed confirmation candle beyond the opposite Gann boundary."""
+    raw=day[day.date>after_time].reset_index(drop=True)
+    if raw.empty:return None
+    b=_bars(raw,confirm_interval)
+    for _,bar in b.iterrows():
+        c=float(bar.close)
+        if side=='SHORT' and c<=trigger:return bar
+        if side=='LONG' and c>=trigger:return bar
+    return None
 
 
 def run_same_day_sr(df,cfg):
+    """Editable same-day Support/Resistance event engine.
+
+    Structural rules:
+      * Resistance WMA reference -> BUY ABOVE only.
+      * Support WMA reference -> SELL BELOW only.
+      * One open position at a time.
+      * If a trade stops, the opposite Gann side may reverse after candle-close confirmation.
+      * Both WMA references can activate independently during the same day.
+      * After each exit, continue scanning chronologically for fresh valid signals until max trades/day.
+    """
     d=base.norm(df);d['session']=d.date.dt.date
     sessions=[(k,v.drop(columns='session').reset_index(drop=True)) for k,v in d.groupby('session',sort=True)]
-    out=[];daily=[];stats={'test_days':max(0,len(sessions)-1),'no_touch':0,'touch_ambiguous':0,'no_trigger':0,'same_bar_both':0,'engine':'same_day_sr_editable'}
-    wma=float(cfg.get('wma_factor',.382));touch_int=int(cfg.get('touch_interval',5) or 5)
+    out=[];daily=[]
+    stats={'test_days':max(0,len(sessions)-1),'no_touch':0,'touch_ambiguous':0,'no_trigger':0,'same_bar_both':0,'engine':'same_day_sr_sequential'}
+    wma=float(cfg.get('wma_factor',.382)); confirm=int(cfg.get('confirm_interval',1) or 1)
     sh,sm=map(int,str(cfg.get('start_time','09:15')).split(':'));eh,em=map(int,str(cfg.get('end_time','15:30')).split(':'))
-    maxtr=cfg.get('max_trades_per_day');maxtr=int(maxtr) if maxtr not in (None,'',0) else 2
-    reentry=bool(cfg.get('reentry',True))
+    maxtr=cfg.get('max_trades_per_day');maxtr=int(maxtr) if maxtr not in (None,'',0) else 999
+    reentry=bool(cfg.get('reentry',True)); direction=cfg.get('direction','both'); entry_mode=cfg.get('entry_mode','trigger')
+    slip=float(cfg.get('slippage_points',0) or 0); cost=float(cfg.get('cost_points',0) or 0)
+
     for di in range(1,len(sessions)):
         sdate,day=sessions[di];_,prev=sessions[di-1]
         day=day[(day.date.dt.time>=time(sh,sm))&(day.date.dt.time<=time(eh,em))].reset_index(drop=True)
         if day.empty:continue
-        ph=float(prev.high.max());pl=float(prev.low.min());pc=float(prev.iloc[-1].close);res=pc+(ph-pl)*wma;sup=pc-(ph-pl)*wma
-        first=_first_wma_touch(day,res,sup,touch_int)
-        if first is None:stats['no_touch']+=1;continue
-        if first.get('ambiguous'):stats['touch_ambiguous']+=1;continue
-        day_pts=0;count=0
-        t1=_trade(day,first['time'],first['type'],first['level'],1,'FIRST_WMA',cfg)
-        if t1 is None or t1.get('ambiguous'):
-            stats['no_trigger']+=1;continue
-        exit1=t1.pop('_exit_ts');t1['date']=str(sdate);out.append(t1);day_pts+=t1['points'];count+=1
-        if reentry and count<maxtr and t1['reason']!='EOD':
-            opposite='SUPPORT' if first['type']=='RESISTANCE' else 'RESISTANCE'
-            opp=_first_wma_touch(day,res,sup,touch_int,start_after=exit1,target_type=opposite)
-            if opp is not None:
-                t2=_trade(day,opp['time'],opp['type'],opp['level'],2,'OPPOSITE_RECALC',cfg)
-                if t2 is not None and not t2.get('ambiguous'):
-                    t2.pop('_exit_ts',None);t2['date']=str(sdate);out.append(t2);day_pts+=t2['points'];count+=1
+        ph=float(prev.high.max());pl=float(prev.low.min());pc=float(prev.iloc[-1].close)
+        res=pc+(ph-pl)*wma;sup=pc-(ph-pl)*wma
+        refs={
+            'RESISTANCE':{'level':float(res),'touch':_first_touch_time(day,float(res),'RESISTANCE'),'active':False,'armed':True},
+            'SUPPORT':{'level':float(sup),'touch':_first_touch_time(day,float(sup),'SUPPORT'),'active':False,'armed':True},
+        }
+        if refs['RESISTANCE']['touch'] is None and refs['SUPPORT']['touch'] is None:
+            stats['no_touch']+=1;continue
+
+        grids={}
+        for typ,r in refs.items():
+            if r['touch'] is not None:
+                buy,sell=base.gann(r['level'],float(cfg.get('gann_step',.125)))
+                grids[typ]={'buy':float(buy),'sell':float(sell)}
+
+        cursor=day.iloc[0].date
+        count=0;day_pts=0
+        pending_reverse=None
+
+        while count<maxtr:
+            # Activate WMA references once their touch time has occurred.
+            for typ,r in refs.items():
+                if r['touch'] is not None and r['touch']<=cursor:r['active']=True
+
+            # SL reversal gets first priority because it belongs to the just-completed trade.
+            if pending_reverse is not None:
+                rr=pending_reverse
+                cb=_confirm_reverse(day,cursor,rr['side'],rr['trigger'],confirm)
+                if cb is not None:
+                    side=rr['side']; typ=rr['ref_type']; g=grids[typ]
+                    entry=float(cb.close)+(slip if side=='LONG' else -slip)
+                    stop=_stop_price(side,entry,g['buy'],g['sell'],cfg)
+                    target=_target_price(side,entry,stop,cfg)
+                    ex,ext,reason=_exit_trade(day,cb.date,side,entry,stop,target,cfg)
+                    if ex is not None:
+                        count+=1;pts=((ex-entry) if side=='LONG' else (entry-ex))-cost
+                        tr={'date':str(sdate),'trade_no':count,'reference_phase':'SL_REVERSAL','first_touch':typ,
+                            'touch_time':str(refs[typ]['touch']),'reference_price':round(refs[typ]['level'],2),
+                            'buy_above':g['buy'],'sell_below':g['sell'],'side':side,'entry_time':str(cb.date),
+                            'entry':round(entry,2),'stop':round(stop,2),'target':round(target,2),'exit_time':str(ext),
+                            'exit':round(float(ex),2),'reason':reason,'points':round(float(pts),2)}
+                        out.append(tr);day_pts+=pts;cursor=ext+pd.Timedelta(seconds=1)
+                        pending_reverse=None
+                        # If the reversal itself stops, allow one new reversal only if re-entry is enabled.
+                        if reentry and reason=='SL':
+                            opp='SHORT' if side=='LONG' else 'LONG'
+                            trig=g['sell'] if opp=='SHORT' else g['buy']
+                            pending_reverse={'side':opp,'trigger':trig,'ref_type':typ}
+                        if reason=='EOD':break
+                        continue
+                pending_reverse=None
+
+            # Find the earliest next primary S/R signal after cursor.
+            candidates=[]
+            for typ,r in refs.items():
+                if r['touch'] is None:continue
+                if r['touch']>cursor:continue
+                side='LONG' if typ=='RESISTANCE' else 'SHORT'
+                if direction=='long' and side!='LONG':continue
+                if direction=='short' and side!='SHORT':continue
+                g=grids[typ];trigger=g['buy'] if side=='LONG' else g['sell']
+                raw=day[day.date>=cursor].reset_index(drop=True)
+                sig=_bars(raw,confirm)
+                for _,bar in sig.iterrows():
+                    # Fresh-cross re-arm for repeated primary entries on the same WMA grid.
+                    if not r['armed']:
+                        c=float(bar.close)
+                        if side=='LONG' and c<trigger:r['armed']=True
+                        if side=='SHORT' and c>trigger:r['armed']=True
+                    if r['armed'] and _entry_hit(bar,side,trigger,entry_mode):
+                        candidates.append((bar.date,typ,side,bar));break
+            # A not-yet-active WMA reference may become available later in the day.
+            future_touches=[r['touch'] for r in refs.values() if r['touch'] is not None and r['touch']>cursor]
+            if not candidates:
+                if future_touches:
+                    cursor=min(future_touches)
+                    continue
+                break
+
+            candidates.sort(key=lambda x:x[0]); etime,typ,side,eb=candidates[0];g=grids[typ]
+            if entry_mode=='trigger':entry=float(g['buy'] if side=='LONG' else g['sell'])
+            else:entry=float(eb.close)+(slip if side=='LONG' else -slip)
+            stop=_stop_price(side,entry,g['buy'],g['sell'],cfg);target=_target_price(side,entry,stop,cfg)
+            ex,ext,reason=_exit_trade(day,etime,side,entry,stop,target,cfg)
+            refs[typ]['armed']=False
+            if ex is None:
+                cursor=ext+pd.Timedelta(seconds=1);continue
+            count+=1;pts=((ex-entry) if side=='LONG' else (entry-ex))-cost
+            phase='RESISTANCE_GRID' if typ=='RESISTANCE' else 'SUPPORT_GRID'
+            tr={'date':str(sdate),'trade_no':count,'reference_phase':phase,'first_touch':typ,
+                'touch_time':str(refs[typ]['touch']),'reference_price':round(refs[typ]['level'],2),
+                'buy_above':g['buy'],'sell_below':g['sell'],'side':side,'entry_time':str(etime),
+                'entry':round(entry,2),'stop':round(stop,2),'target':round(target,2),'exit_time':str(ext),
+                'exit':round(float(ex),2),'reason':reason,'points':round(float(pts),2)}
+            out.append(tr);day_pts+=pts;cursor=ext+pd.Timedelta(seconds=1)
+            if reentry and reason=='SL':
+                opp='SHORT' if side=='LONG' else 'LONG'
+                trig=g['sell'] if opp=='SHORT' else g['buy']
+                pending_reverse={'side':opp,'trigger':trig,'ref_type':typ}
+            if reason=='EOD':break
+
         daily.append({'date':str(sdate),'points':round(float(day_pts),2),'trades':count})
-    summary=base._summary(out,stats);summary['long_trades']=sum(t['side']=='LONG' for t in out);summary['short_trades']=sum(t['side']=='SHORT' for t in out);summary['opposite_recalc_trades']=sum(t.get('reference_phase')=='OPPOSITE_RECALC' for t in out)
+
+    summary=base._summary(out,stats)
+    summary['long_trades']=sum(t['side']=='LONG' for t in out)
+    summary['short_trades']=sum(t['side']=='SHORT' for t in out)
+    summary['resistance_grid_trades']=sum(t.get('reference_phase')=='RESISTANCE_GRID' for t in out)
+    summary['support_grid_trades']=sum(t.get('reference_phase')=='SUPPORT_GRID' for t in out)
+    summary['sl_reversal_trades']=sum(t.get('reference_phase')=='SL_REVERSAL' for t in out)
     return summary,out,daily,base._monthly(out)
 
 
