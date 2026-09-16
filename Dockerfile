@@ -5,12 +5,16 @@ COPY index-production.html /app/index-production.html
 COPY store-production.py /app/store-production.py
 COPY main-production.py /app/main-production.py
 COPY strategy-lab.py /app/strategy-lab.py
+COPY lab-upgrade.js /app/lab-upgrade.js
+COPY inject-lab.py /app/inject-lab.py
 RUN apt-get update && apt-get install -y unzip && \
     unzip /app/app.zip -d /app && \
     cp /app/index-production.html /app/app/static/index.html && \
     cp /app/store-production.py /app/app/store.py && \
     cp /app/main-production.py /app/app/main.py && \
     cp /app/strategy-lab.py /app/app/strategy_lab.py && \
+    cp /app/lab-upgrade.js /app/app/static/lab-upgrade.js && \
+    python /app/inject-lab.py && \
     pip install --no-cache-dir -r /app/requirements.txt && \
     mv /usr/local/bin/uvicorn /usr/local/bin/uvicorn-real && \
     printf '%s\n' '#!/bin/sh' \
