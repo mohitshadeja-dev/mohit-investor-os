@@ -25,12 +25,36 @@ def bars(day,minutes):
     return x.resample(f'{int(minutes)}min',origin='start_day',offset='15min').agg(open=('open','first'),high=('high','max'),low=('low','min'),close=('close','last')).dropna().reset_index()
 
 def first_touch(day,resistance,support,minutes=5,side_filter='both'):
+    """Match the original 7750 engine exactly.
+
+    First identify the first qualifying N-minute bucket. If both support and
+    resistance are inside that same bucket, the day is ambiguous. Otherwise,
+    locate the exact underlying 1-minute candle inside that bucket that first
+    touched the chosen level; entry scanning starts only from that minute.
+    """
+    minutes=int(minutes)
     b=bars(day,minutes)
     for _,r in b.iterrows():
         tr=float(r.high)>=resistance and side_filter in ('both','resistance')
         ts=float(r.low)<=support and side_filter in ('both','support')
-        if tr and ts:return {'ambiguous':True,'time':r.date}
-        if tr or ts:return {'ambiguous':False,'type':'RESISTANCE' if tr else 'SUPPORT','level':float(resistance if tr else support),'time':r.date}
+        if tr and ts:
+            return {'ambiguous':True,'time':r.date}
+        if tr or ts:
+            typ='RESISTANCE' if tr else 'SUPPORT'
+            level=float(resistance if tr else support)
+            if minutes<=1:
+                touch_minute=r.date
+            else:
+                bucket_start=r.date
+                bucket_end=bucket_start+pd.Timedelta(minutes=minutes)
+                raw=day[(day.date>=bucket_start)&(day.date<bucket_end)]
+                touch_minute=bucket_start
+                for _,m in raw.iterrows():
+                    hit=float(m.high)>=level if tr else float(m.low)<=level
+                    if hit:
+                        touch_minute=m.date
+                        break
+            return {'ambiguous':False,'type':typ,'level':level,'time':touch_minute,'bucket_time':r.date}
     return None
 
 def _signal(bar,side,buy,sell,mode='close'):
