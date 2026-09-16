@@ -64,7 +64,7 @@ def _run_leg_positional(side,entry,stop,target,start_date,start_time,dates,sessi
     pts=(ex-entry) if side=='LONG' else (entry-ex)
     return {'leg':leg,'side':side,'entry':float(entry),'stop':float(stop),'target':float(target),'exit':float(ex),'exit_time':ext,'exit_date':exit_date,'reason':reason,'points':float(pts),'stop_bar':stop_bar}
 
-def _summary(trades,weeks,skipped_gap,no_setup,blocked_tuesday,blocked_fib):
+def _summary(trades,weeks,skipped_gap,skipped_wednesday_distance,no_setup,blocked_tuesday,blocked_fib):
     pts=[float(t['points']) for t in trades]; wins=[p for p in pts if p>0]; losses=[p for p in pts if p<0]
     eq=peak=dd=0
     for p in pts:
@@ -75,7 +75,8 @@ def _summary(trades,weeks,skipped_gap,no_setup,blocked_tuesday,blocked_fib):
         'wins':len(wins),'losses':len(losses),'win_rate':round(100*len(wins)/len(trades),2) if trades else 0,
         'total_points':round(sum(pts),2),'avg_points':round(sum(pts)/len(trades),2) if trades else 0,
         'targets':sum(t['reason']=='TARGET' for t in trades),'stops':sum(t['reason']=='SL' for t in trades),'data_end_exits':sum(t['reason']=='DATA_END' for t in trades),
-        'max_drawdown_points':round(dd,2),'skipped_gap_days':skipped_gap,'no_setup_days':no_setup,
+        'max_drawdown_points':round(dd,2),'skipped_gap_days':skipped_gap,
+        'skipped_wednesday_200_days':skipped_wednesday_distance,'no_setup_days':no_setup,
         'blocked_by_tuesday_range':blocked_tuesday,'blocked_by_fibonacci':blocked_fib,
         'wednesday_trades':sum(t['trade_day']=='WED' and t.get('leg','PRIMARY')=='PRIMARY' for t in trades),
         'thursday_trades':sum(t['trade_day']=='THU' and t.get('leg','PRIMARY')=='PRIMARY' for t in trades),
@@ -85,7 +86,8 @@ def _summary(trades,weeks,skipped_gap,no_setup,blocked_tuesday,blocked_fib):
         'overnight_carries':sum(pd.Timestamp(t['exit_date']).date()>pd.Timestamp(t['entry_date']).date() for t in trades),
     }
 
-def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_target_points=30.0,same_bar_policy='stop_first'):
+def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_target_points=30.0,
+               same_bar_policy='stop_first',wednesday_distance_points=200.0):
     """Weekly WMA-Gann positional strategy. All signals and exits use completed 5-minute closes.
 
     Setup sequence:
@@ -95,6 +97,8 @@ def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_ta
     Entry filters:
       BUY requires 5m close >= Gann Buy, > Tuesday High, and > previous-day Fib 0.382.
       SELL requires 5m close <= Gann Sell, < Tuesday Low, and < previous-day Fib 0.618.
+      Skip Wednesday completely when its opening price is >= Tuesday High + 200 points
+      or <= Tuesday Low - 200 points. Resume with the first valid setup from Thursday.
 
     Position management:
       Primary target = 100 points. SL = opposite Gann boundary.
@@ -110,7 +114,7 @@ def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_ta
     dates=sorted(sessions); groups={}
     for sd in dates:
         iso=pd.Timestamp(sd).isocalendar(); groups.setdefault((int(iso.year),int(iso.week)),[]).append(sd)
-    trades=[]; attempts=[]; skipped_gap=no_setup=blocked_tuesday=blocked_fib=0; week_count=0
+    trades=[]; attempts=[]; skipped_gap=skipped_wednesday_distance=no_setup=blocked_tuesday=blocked_fib=0; week_count=0
     blocked_until=None
     for wk,wdates in sorted(groups.items()):
         week_count+=1; bywd={pd.Timestamp(x).weekday():x for x in wdates}
@@ -128,6 +132,19 @@ def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_ta
             prevs=[x for x in dates if x<cand]
             if not prevs:continue
             ref=max(prevs); prev=sessions[ref]; day=sessions[cand]
+            if wd==2:
+                wednesday_open=float(day.iloc[0].open)
+                distance=float(wednesday_distance_points)
+                if wednesday_open>=tuesday_high+distance or wednesday_open<=tuesday_low-distance:
+                    skipped_wednesday_distance+=1
+                    attempts.append({
+                        'week':f'{wk[0]}-W{wk[1]:02d}','trade_day':label,'date':str(cand),
+                        'reference_date':str(ref),'tuesday_date':str(anchor),
+                        'tuesday_high':round(tuesday_high,2),'tuesday_low':round(tuesday_low,2),
+                        'wednesday_open':round(wednesday_open,2),'distance_points':round(distance,2),
+                        'status':'WEDNESDAY_200_POINT_SKIP'
+                    })
+                    continue
             ph=float(prev.high.max()); pl=float(prev.low.min()); pc=float(prev.iloc[-1].close)
             fib382,fib618=_fib_levels(pl,ph); wma=(ph-pl)*float(wma_factor); resistance=pc+wma; support=pc-wma
             touch=_first_close_break(day,resistance,support)
@@ -172,4 +189,4 @@ def run_weekly(df,wma_factor=.382,gann_step=.125,target_points=100.0,gap_near_ta
                     'exit_date':str(leg2['exit_date']),'exit_time':str(leg2['exit_time']),'exit':round(leg2['exit'],2),'reason':leg2['reason'],
                     'points':round(leg2['points'],2),'carried_overnight':bool(pd.Timestamp(leg2['exit_date']).date()>pd.Timestamp(leg1['exit_date']).date()),'reversed_from':side}
                 trades.append(t2); attempts.append(t2); blocked_until=leg2['exit_date']
-    return _summary(trades,week_count,skipped_gap,no_setup,blocked_tuesday,blocked_fib),trades,attempts
+    return _summary(trades,week_count,skipped_gap,skipped_wednesday_distance,no_setup,blocked_tuesday,blocked_fib),trades,attempts
