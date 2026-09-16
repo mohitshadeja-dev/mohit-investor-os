@@ -203,11 +203,12 @@ def run_same_day_sr(df,cfg):
                 if r['touch'] is None:continue
                 if r['touch']>cursor:continue
                 side='LONG' if typ=='RESISTANCE' else 'SHORT'
-                # Gap-up >120 plus a red first 5m candle suppresses Resistance LONG;
-                # gap-down >120 plus a green first 5m candle suppresses Support SHORT.
-                # The opposite WMA reference remains live and can become trade #1.
-                if block_long and side=='LONG':continue
-                if block_short and side=='SHORT':continue
+                # Gap-up >120 plus a red first 5m candle blocks the Resistance
+                # LONG but keeps that grid's Sell Below live as the first SHORT.
+                # Vice versa, a large gap-down plus green first candle blocks
+                # Support SHORT but keeps that grid's Buy Above live as LONG.
+                if block_long and typ=='RESISTANCE':side='SHORT'
+                if block_short and typ=='SUPPORT':side='LONG'
                 if direction=='long' and side!='LONG':continue
                 if direction=='short' and side!='SHORT':continue
                 g=grids[typ];trigger=g['buy'] if side=='LONG' else g['sell']
@@ -238,7 +239,8 @@ def run_same_day_sr(df,cfg):
             if ex is None:
                 cursor=ext+pd.Timedelta(seconds=1);continue
             count+=1;pts=((ex-entry) if side=='LONG' else (entry-ex))-cost
-            phase='RESISTANCE_GRID' if typ=='RESISTANCE' else 'SUPPORT_GRID'
+            filtered_opposite=(block_long and typ=='RESISTANCE' and side=='SHORT') or (block_short and typ=='SUPPORT' and side=='LONG')
+            phase='FILTER_OPPOSITE' if filtered_opposite else ('RESISTANCE_GRID' if typ=='RESISTANCE' else 'SUPPORT_GRID')
             tr={'date':str(sdate),'trade_no':count,'reference_phase':phase,'first_touch':typ,
                 'touch_time':str(refs[typ]['touch']),'reference_price':round(refs[typ]['level'],2),
                 'buy_above':g['buy'],'sell_below':g['sell'],'side':side,'entry_time':str(etime),
@@ -259,6 +261,7 @@ def run_same_day_sr(df,cfg):
     summary['resistance_grid_trades']=sum(t.get('reference_phase')=='RESISTANCE_GRID' for t in out)
     summary['support_grid_trades']=sum(t.get('reference_phase')=='SUPPORT_GRID' for t in out)
     summary['sl_reversal_trades']=sum(t.get('reference_phase')=='SL_REVERSAL' for t in out)
+    summary['filter_opposite_trades']=sum(t.get('reference_phase')=='FILTER_OPPOSITE' for t in out)
     summary['cost_to_cost_exits']=sum(t.get('reason')=='COST' for t in out)
     return summary,out,daily,base._monthly(out)
 
