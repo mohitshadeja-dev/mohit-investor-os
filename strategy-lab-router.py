@@ -42,6 +42,8 @@ def _target_price(side,entry,stop,cfg):
 
 def _exit_trade(day, entry_time, side, entry, stop, target, cfg):
     same=cfg.get('same_bar_policy','stop_first'); stop_mode=cfg.get('stop_mode','gann')
+    trail_points=float(cfg.get('trail_to_cost_points',80) or 0)
+    trail_active=False
     work=day[day.date>entry_time].reset_index(drop=True)
     ex=None;ext=None;reason=None
     for _,m in work.iterrows():
@@ -55,13 +57,42 @@ def _exit_trade(day, entry_time, side, entry, stop, target, cfg):
             hit_sl=(mod==4) and (float(m.close)<=stop if side=='LONG' else float(m.close)>=stop)
         else:
             hit_sl=float(m.low)<=stop if side=='LONG' else float(m.high)>=stop
+        if trail_active:
+            hit_sl=False
         hit_t=float(m.high)>=target if side=='LONG' else float(m.low)<=target
+
+        # The editable same-day strategy moves its stop to entry after an
+        # 80-point favourable move.  For an OHLC bar that contains both the
+        # activation level and entry, the agreed ordering is activation first,
+        # followed by the cost-to-cost stop.
+        activates_trail=(
+            trail_points>0 and not trail_active and
+            (float(m.high)>=entry+trail_points if side=='LONG' else float(m.low)<=entry-trail_points)
+        )
+
+        # Before the trail is armed, preserve the configured initial-stop
+        # handling.  This also avoids pretending the favourable move happened
+        # first when a single bar spans both the original stop and +80.
         if hit_sl and hit_t:
             if same=='exclude':return None,m.date,'AMBIGUOUS'
             if same=='target_first':ex=target;reason='TARGET'
             else:ex=stop;reason='SL'
             ext=m.date;break
         if hit_sl:ex=stop;ext=m.date;reason='SL';break
+
+        if activates_trail:
+            trail_active=True
+
+        hit_cost=(
+            trail_active and
+            (float(m.low)<=entry if side=='LONG' else float(m.high)>=entry)
+        )
+        if hit_cost and hit_t:
+            if same=='exclude':return None,m.date,'AMBIGUOUS'
+            if same=='target_first':ex=target;reason='TARGET'
+            else:ex=entry;reason='COST'
+            ext=m.date;break
+        if hit_cost:ex=entry;ext=m.date;reason='COST';break
         if hit_t:ex=target;ext=m.date;reason='TARGET';break
     if ex is None:
         last=day.iloc[-1];ex=float(last.close);ext=last.date;reason='EOD'
@@ -214,6 +245,7 @@ def run_same_day_sr(df,cfg):
     summary['resistance_grid_trades']=sum(t.get('reference_phase')=='RESISTANCE_GRID' for t in out)
     summary['support_grid_trades']=sum(t.get('reference_phase')=='SUPPORT_GRID' for t in out)
     summary['sl_reversal_trades']=sum(t.get('reference_phase')=='SL_REVERSAL' for t in out)
+    summary['cost_to_cost_exits']=sum(t.get('reason')=='COST' for t in out)
     return summary,out,daily,base._monthly(out)
 
 
