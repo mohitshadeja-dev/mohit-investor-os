@@ -125,9 +125,7 @@ def run_same_day_sr(df,cfg):
     d=base.norm(df);d['session']=d.date.dt.date
     sessions=[(k,v.drop(columns='session').reset_index(drop=True)) for k,v in d.groupby('session',sort=True)]
     out=[];daily=[]
-    stats={'test_days':max(0,len(sessions)-1),'no_touch':0,'touch_ambiguous':0,'no_trigger':0,
-           'same_bar_both':0,'large_red_first_candle':0,'large_green_first_candle':0,
-           'engine':'same_day_sr_sequential'}
+    stats={'test_days':max(0,len(sessions)-1),'no_touch':0,'touch_ambiguous':0,'no_trigger':0,'same_bar_both':0,'engine':'same_day_sr_sequential'}
     wma=float(cfg.get('wma_factor',.382)); confirm=int(cfg.get('confirm_interval',1) or 1)
     sh,sm=map(int,str(cfg.get('start_time','09:15')).split(':'));eh,em=map(int,str(cfg.get('end_time','15:30')).split(':'))
     maxtr=cfg.get('max_trades_per_day');maxtr=int(maxtr) if maxtr not in (None,'',0) else 999
@@ -139,13 +137,6 @@ def run_same_day_sr(df,cfg):
         day=day[(day.date.dt.time>=time(sh,sm))&(day.date.dt.time<=time(eh,em))].reset_index(drop=True)
         if day.empty:continue
         ph=float(prev.high.max());pl=float(prev.low.min());pc=float(prev.iloc[-1].close)
-        first5=day.iloc[:5]
-        first_body=(float(first5.iloc[-1].close)-float(first5.iloc[0].open)) if len(first5)==5 else 0
-        opening_gap=float(day.iloc[0].open)-pc
-        block_long=opening_gap > 120 and first_body < 0
-        block_short=opening_gap < -120 and first_body > 0
-        if block_long:stats['large_red_first_candle']+=1
-        if block_short:stats['large_green_first_candle']+=1
         res=pc+(ph-pl)*wma;sup=pc-(ph-pl)*wma
         refs={
             'RESISTANCE':{'level':float(res),'touch':_first_touch_time(day,float(res),'RESISTANCE'),'active':False,'armed':True},
@@ -203,12 +194,6 @@ def run_same_day_sr(df,cfg):
                 if r['touch'] is None:continue
                 if r['touch']>cursor:continue
                 side='LONG' if typ=='RESISTANCE' else 'SHORT'
-                # Gap-up >120 plus a red first 5m candle blocks the Resistance
-                # LONG but keeps that grid's Sell Below live as the first SHORT.
-                # Vice versa, a large gap-down plus green first candle blocks
-                # Support SHORT but keeps that grid's Buy Above live as LONG.
-                if block_long and typ=='RESISTANCE':side='SHORT'
-                if block_short and typ=='SUPPORT':side='LONG'
                 if direction=='long' and side!='LONG':continue
                 if direction=='short' and side!='SHORT':continue
                 g=grids[typ];trigger=g['buy'] if side=='LONG' else g['sell']
@@ -239,8 +224,7 @@ def run_same_day_sr(df,cfg):
             if ex is None:
                 cursor=ext+pd.Timedelta(seconds=1);continue
             count+=1;pts=((ex-entry) if side=='LONG' else (entry-ex))-cost
-            filtered_opposite=(block_long and typ=='RESISTANCE' and side=='SHORT') or (block_short and typ=='SUPPORT' and side=='LONG')
-            phase='FILTER_OPPOSITE' if filtered_opposite else ('RESISTANCE_GRID' if typ=='RESISTANCE' else 'SUPPORT_GRID')
+            phase='RESISTANCE_GRID' if typ=='RESISTANCE' else 'SUPPORT_GRID'
             tr={'date':str(sdate),'trade_no':count,'reference_phase':phase,'first_touch':typ,
                 'touch_time':str(refs[typ]['touch']),'reference_price':round(refs[typ]['level'],2),
                 'buy_above':g['buy'],'sell_below':g['sell'],'side':side,'entry_time':str(etime),
@@ -261,7 +245,6 @@ def run_same_day_sr(df,cfg):
     summary['resistance_grid_trades']=sum(t.get('reference_phase')=='RESISTANCE_GRID' for t in out)
     summary['support_grid_trades']=sum(t.get('reference_phase')=='SUPPORT_GRID' for t in out)
     summary['sl_reversal_trades']=sum(t.get('reference_phase')=='SL_REVERSAL' for t in out)
-    summary['filter_opposite_trades']=sum(t.get('reference_phase')=='FILTER_OPPOSITE' for t in out)
     summary['cost_to_cost_exits']=sum(t.get('reason')=='COST' for t in out)
     return summary,out,daily,base._monthly(out)
 
