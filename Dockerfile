@@ -13,6 +13,8 @@ COPY lab-upgrade.js /app/lab-upgrade.js
 COPY presets-7750.js /app/presets-7750.js
 COPY weekly-wma-gann.js /app/weekly-wma-gann.js
 COPY weekly-reverse-only.js /app/weekly-reverse-only.js
+COPY options_backtest.py /app/options_backtest.py
+COPY options-window.js /app/options-window.js
 COPY inject-lab.py /app/inject-lab.py
 RUN apt-get update && apt-get install -y unzip && \
     unzip /app/app.zip -d /app && \
@@ -28,6 +30,8 @@ RUN apt-get update && apt-get install -y unzip && \
     cp /app/presets-7750.js /app/app/static/presets-7750.js && \
     cp /app/weekly-wma-gann.js /app/app/static/weekly-wma-gann.js && \
     cp /app/weekly-reverse-only.js /app/app/static/weekly-reverse-only.js && \
+    cp /app/options_backtest.py /app/app/options_backtest.py && \
+    cp /app/options-window.js /app/app/static/options-window.js && \
     python /app/inject-lab.py && \
     pip install --no-cache-dir -r /app/requirements.txt && \
     mv /usr/local/bin/uvicorn /usr/local/bin/uvicorn-real && \
