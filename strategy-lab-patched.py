@@ -28,11 +28,23 @@ def _augment(summary,trades):
     return summary
 
 
+def _decode_policies(same_bar_policy):
+    # Special audit values let the existing API test entry sequencing without changing its schema.
+    # Format: entry_<direction-policy>__<exit-policy>
+    if same_bar_policy.startswith('entry_'):
+        raw=same_bar_policy[6:]
+        if '__' in raw: entry_policy,exit_policy=raw.split('__',1)
+        else: entry_policy,exit_policy=raw,'stop_first'
+        return entry_policy,exit_policy
+    return 'candle_direction',same_bar_policy
+
+
 def run_original_immediate(df, stop_rule='gann', same_bar_policy='stop_first'):
+    entry_tie_policy,exit_same_bar_policy=_decode_policies(str(same_bar_policy))
     d=base.norm(df); d['session']=d.date.dt.date
     sessions=[(k,v.drop(columns='session').reset_index(drop=True)) for k,v in d.groupby('session',sort=True)]
     out=[]; daily=[]
-    stats={'test_days':max(0,len(sessions)-1),'no_touch':0,'touch_ambiguous':0,'no_trigger':0,'same_bar_both':0,'engine':'original_exact_trigger_'+stop_rule+'_'+same_bar_policy}
+    stats={'test_days':max(0,len(sessions)-1),'no_touch':0,'touch_ambiguous':0,'no_trigger':0,'same_bar_both':0,'dual_trigger_entries':0,'dual_trigger_skips':0,'engine':'original_exact_trigger_'+stop_rule+'_'+entry_tie_policy+'_'+exit_same_bar_policy}
     for di in range(1,len(sessions)):
         sdate,day=sessions[di]; _,prev=sessions[di-1]
         ph=float(prev.high.max()); pl=float(prev.low.min()); pc=float(prev.iloc[-1].close)
@@ -63,8 +75,17 @@ def run_original_immediate(df, stop_rule='gann', same_bar_policy='stop_first'):
             b=day.iloc[i]
             long_hit=float(b.high)>=buy; short_hit=float(b.low)<=sell
             if long_hit and short_hit:
-                if float(b.close)>=float(b.open): entry_i=i; side='LONG'; entry=float(buy)
-                else: entry_i=i; side='SHORT'; entry=float(sell)
+                stats['dual_trigger_entries']+=1
+                if entry_tie_policy=='skip':
+                    stats['dual_trigger_skips']+=1; entry_i=None; side=None; entry=None
+                    break
+                elif entry_tie_policy=='long_first':
+                    entry_i=i; side='LONG'; entry=float(buy)
+                elif entry_tie_policy=='short_first':
+                    entry_i=i; side='SHORT'; entry=float(sell)
+                else:
+                    if float(b.close)>=float(b.open): entry_i=i; side='LONG'; entry=float(buy)
+                    else: entry_i=i; side='SHORT'; entry=float(sell)
                 break
             if long_hit: entry_i=i; side='LONG'; entry=float(buy); break
             if short_hit: entry_i=i; side='SHORT'; entry=float(sell); break
@@ -91,8 +112,8 @@ def run_original_immediate(df, stop_rule='gann', same_bar_policy='stop_first'):
                     hit_stop=float(b.close)<=stop if side=='LONG' else float(b.close)>=stop
             if hit_stop and hit_target:
                 stats['same_bar_both']+=1
-                if same_bar_policy=='target_first': exit_px=target; exit_time=b.date; reason='TARGET'
-                elif same_bar_policy=='exclude': drop_trade=True
+                if exit_same_bar_policy=='target_first': exit_px=target; exit_time=b.date; reason='TARGET'
+                elif exit_same_bar_policy=='exclude': drop_trade=True
                 else: exit_px=stop; exit_time=b.date; reason='SL'
                 break
             if hit_stop:
