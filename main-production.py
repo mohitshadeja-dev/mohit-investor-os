@@ -33,6 +33,7 @@ class LabRequest(BaseModel):
     target_mode:str='points'; target_value:float=100.; stop_mode:str='gann'; stop_value:float=0
     reentry:bool=True; max_trades_per_day:int|None=None; same_bar_policy:str='stop_first'; direction:str='both'; entry_mode:str='close'; touch_side:str='both'
     start_time:str='09:15'; end_time:str='15:30'; cost_points:float=0; slippage_points:float=0
+    trail_to_cost_points:float=80
 class SaveTestRequest(BaseModel): name:str=Field(min_length=1,max_length=100); symbol:str; config:dict; summary:dict; trades:list[dict]=[]
 class BatchRequest(BaseModel): symbols:list[str]; config:dict
 class DhanSettings(BaseModel): client_id:str=Field(min_length=3); access_token:str=Field(min_length=20)
@@ -220,7 +221,8 @@ def stockmock_worklist(from_date:date=date(2025,9,5),to_date:date=date(2026,9,15
         cfg={'symbol':'NIFTY 50','from_date':str(from_date),'to_date':str(to_date),'touch_interval':5,'confirm_interval':1,
              'wma_factor':.382,'gann_step':.125,'touch_side':'both_recalc','entry_mode':'trigger','direction':'both',
              'same_bar_policy':'stop_first','target_mode':'points','target_value':150,'stop_mode':'points','stop_value':150,
-             'reentry':False,'max_trades_per_day':3,'start_time':'09:15','end_time':'15:30','cost_points':0,'slippage_points':0}
+             'reentry':False,'max_trades_per_day':3,'start_time':'09:15','end_time':'15:30','cost_points':0,'slippage_points':0,
+             'trail_to_cost_points':80}
         summary,trades,_,_=run_lab(df,cfg)
         if abs(float(summary.get('total_points',0))-7575.6)>.05 or int(summary.get('trades',0))!=277:
             raise RuntimeError(f"Locked baseline audit failed: {summary.get('trades')} trades / {summary.get('total_points')} points")
@@ -249,7 +251,8 @@ def _options_worker(jid,req):
         cfg={'symbol':'NIFTY 50','from_date':str(req.from_date),'to_date':str(req.to_date),'touch_interval':5,'confirm_interval':1,
              'wma_factor':.382,'gann_step':.125,'touch_side':'both_recalc','entry_mode':'trigger','direction':'both',
              'same_bar_policy':'stop_first','target_mode':'points','target_value':150,'stop_mode':'points','stop_value':150,
-             'reentry':False,'max_trades_per_day':3,'start_time':'09:15','end_time':'15:30','cost_points':0,'slippage_points':0}
+             'reentry':False,'max_trades_per_day':3,'start_time':'09:15','end_time':'15:30','cost_points':0,'slippage_points':0,
+             'trail_to_cost_points':80}
         signal_summary,signals,_,_=run_lab(df,cfg)
         job.update({'signal_summary':signal_summary,'signal_trades':len(signals),'stage':'options'})
         def progress(done,total,message):job.update({'done':done,'total':total,'message':message})
