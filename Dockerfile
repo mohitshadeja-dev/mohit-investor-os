@@ -5,6 +5,7 @@ COPY index-production.html /app/index-production.html
 COPY store-production.py /app/store-production.py
 COPY main-production.py /app/main-production.py
 COPY strategy-lab.py /app/strategy-lab.py
+COPY strategy-lab-patched.py /app/strategy-lab-patched.py
 COPY lab-upgrade.js /app/lab-upgrade.js
 COPY presets-7750.js /app/presets-7750.js
 COPY inject-lab.py /app/inject-lab.py
@@ -13,7 +14,8 @@ RUN apt-get update && apt-get install -y unzip && \
     cp /app/index-production.html /app/app/static/index.html && \
     cp /app/store-production.py /app/app/store.py && \
     cp /app/main-production.py /app/app/main.py && \
-    cp /app/strategy-lab.py /app/app/strategy_lab.py && \
+    cp /app/strategy-lab.py /app/app/strategy_lab_base.py && \
+    cp /app/strategy-lab-patched.py /app/app/strategy_lab.py && \
     cp /app/lab-upgrade.js /app/app/static/lab-upgrade.js && \
     cp /app/presets-7750.js /app/app/static/presets-7750.js && \
     python /app/inject-lab.py && \
