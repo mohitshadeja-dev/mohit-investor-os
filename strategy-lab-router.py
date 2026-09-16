@@ -27,7 +27,6 @@ def _first_wma_touch(day,res,sup,minutes,start_after=None,target_type=None):
         if hr and hs:return {'ambiguous':True,'time':r.date}
         if hr or hs:
             typ='RESISTANCE' if hr else 'SUPPORT'; level=float(res if hr else sup)
-            # recover earliest raw minute that touched the chosen WMA level
             end=r.date+pd.Timedelta(minutes=max(1,int(minutes)))
             raw=work[(work.date>=r.date)&(work.date<end)]
             tt=r.date
@@ -61,18 +60,21 @@ def _trade(day,start_time,ref_type,ref_price,trade_no,phase,cfg):
     gstep=float(cfg.get('gann_step',.125)); buy,sell=base.gann(ref_price,gstep)
     confirm=int(cfg.get('confirm_interval',1) or 1); entry_mode=cfg.get('entry_mode','trigger'); direction=cfg.get('direction','both')
     slip=float(cfg.get('slippage_points',0) or 0); cost=float(cfg.get('cost_points',0) or 0); same=cfg.get('same_bar_policy','stop_first')
+
+    # Fixed structural mapping for this strategy:
+    # Resistance reference -> BUY ABOVE only.
+    # Support reference -> SELL BELOW only.
+    side='LONG' if ref_type=='RESISTANCE' else 'SHORT'
+    if direction=='long' and side!='LONG':return None
+    if direction=='short' and side!='SHORT':return None
+
     sig=_bars(day[day.date>=start_time].reset_index(drop=True),confirm)
-    entrybar=None; side=None
+    entrybar=None
     for _,b in sig.iterrows():
-        choices=[]
-        if direction in ('both','long'):choices.append('LONG')
-        if direction in ('both','short'):choices.append('SHORT')
-        hits=[sd for sd in choices if _entry_signal(b,sd,buy,sell,entry_mode)]
-        if not hits:continue
-        if len(hits)==2:side='LONG' if float(b.close)>=float(b.open) else 'SHORT'
-        else:side=hits[0]
-        entrybar=b;break
+        if _entry_signal(b,side,buy,sell,entry_mode):
+            entrybar=b;break
     if entrybar is None:return None
+
     if entry_mode=='trigger':entry=float(buy if side=='LONG' else sell)
     else:entry=float(entrybar.close)+(slip if side=='LONG' else -slip)
     stop=_stop_price(side,entry,buy,sell,cfg); target=_target_price(side,entry,stop,cfg)
@@ -115,8 +117,6 @@ def run_same_day_sr(df,cfg):
         if t1 is None or t1.get('ambiguous'):
             stats['no_trigger']+=1;continue
         exit1=t1.pop('_exit_ts');t1['date']=str(sdate);out.append(t1);day_pts+=t1['points'];count+=1
-        # In same-day both-S/R mode, opposite WMA becomes a new reference after trade 1 finishes.
-        # This is independent of stop/target type and all fields stay editable.
         if reentry and count<maxtr and t1['reason']!='EOD':
             opposite='SUPPORT' if first['type']=='RESISTANCE' else 'RESISTANCE'
             opp=_first_wma_touch(day,res,sup,touch_int,start_after=exit1,target_type=opposite)
