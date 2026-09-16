@@ -40,7 +40,19 @@ def _is_gap80_reverse(cfg):
 
 
 def _is_body120_reverse(cfg):
-    return cfg.get('touch_side')=='body120_reverse'
+    def eqnum(k,v):
+        try:return abs(float(cfg.get(k,v))-float(v))<1e-9
+        except:return False
+    return (
+        int(cfg.get('touch_interval',5))==5 and int(cfg.get('confirm_interval',1))==1 and
+        eqnum('wma_factor',.382) and eqnum('gann_step',.125) and
+        cfg.get('touch_side','both')=='both' and cfg.get('entry_mode')=='trigger' and
+        cfg.get('direction','both')=='both' and cfg.get('target_mode','points')=='points' and
+        eqnum('target_value',100) and cfg.get('stop_mode','gann')=='gann' and
+        bool(cfg.get('reentry',False)) and int(cfg.get('max_trades_per_day') or 0)==2 and
+        str(cfg.get('start_time','09:15'))=='09:15' and str(cfg.get('end_time','15:30'))=='15:30' and
+        eqnum('cost_points',0) and eqnum('slippage_points',0)
+    )
 
 
 def _augment(summary,trades):
