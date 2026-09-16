@@ -6,6 +6,7 @@ COPY store-production.py /app/store-production.py
 COPY main-production.py /app/main-production.py
 COPY strategy-lab.py /app/strategy-lab.py
 COPY strategy-lab-patched.py /app/strategy-lab-patched.py
+COPY strategy-lab-router.py /app/strategy-lab-router.py
 COPY weekly-wma-gann.py /app/weekly-wma-gann.py
 COPY weekly-route-patch.py /app/weekly-route-patch.py
 COPY lab-upgrade.js /app/lab-upgrade.js
@@ -19,7 +20,8 @@ RUN apt-get update && apt-get install -y unzip && \
     cp /app/store-production.py /app/app/store.py && \
     cp /app/main-production.py /app/app/main.py && \
     cp /app/strategy-lab.py /app/app/strategy_lab_base.py && \
-    cp /app/strategy-lab-patched.py /app/app/strategy_lab.py && \
+    cp /app/strategy-lab-patched.py /app/app/strategy_lab_patched_impl.py && \
+    cp /app/strategy-lab-router.py /app/app/strategy_lab.py && \
     cp /app/weekly-wma-gann.py /app/app/weekly_wma_gann.py && \
     python /app/weekly-route-patch.py && \
     cp /app/lab-upgrade.js /app/app/static/lab-upgrade.js && \
