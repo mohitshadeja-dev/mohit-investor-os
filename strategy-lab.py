@@ -73,61 +73,40 @@ def _is_original_7750(cfg):
     )
 
 def run_original_7750(df):
-    """Direct port of the recovered +7,750.3 HTML backtester.
-    One trade/day, 5m first touch, exact 1m touch minute, 1m close trigger,
-    100-point target, opposite Gann SL, ambiguous first-touch and SL+target bars excluded.
-    """
     d=norm(df); d['session']=d.date.dt.date
     sessions=[(k,v.drop(columns='session').reset_index(drop=True)) for k,v in d.groupby('session',sort=True)]
-    out=[]; daily=[]
-    stats={'test_days':max(0,len(sessions)-1),'no_touch':0,'touch_ambiguous':0,'no_trigger':0,'same_bar_both':0,'engine':'original_7750_exact'}
+    out=[]; daily=[]; stats={'test_days':max(0,len(sessions)-1),'no_touch':0,'touch_ambiguous':0,'no_trigger':0,'same_bar_both':0,'engine':'original_7750_exact'}
     for di in range(1,len(sessions)):
         sdate,day=sessions[di]; _,prev=sessions[di-1]
-        ph=float(prev.high.max()); pl=float(prev.low.min()); pc=float(prev.iloc[-1].close)
-        w=(ph-pl)*.382; res=pc+w; sup=pc-w
-        # Manual 5-minute buckets anchored exactly at 09:15, matching recovered JS bucket5().
+        ph=float(prev.high.max()); pl=float(prev.low.min()); pc=float(prev.iloc[-1].close); w=(ph-pl)*.382; res=pc+w; sup=pc-w
         work=day.copy(); mins=work.date.dt.hour*60+work.date.dt.minute; work=work.assign(_slot=((mins-(9*60+15))//5).astype(int))
         touch_type=None; touch_minute=None; touch_px=None; ambiguous=False
         for slot,g in work.groupby('_slot',sort=True):
             if slot<0: continue
             tr=float(g.high.max())>=res; ts=float(g.low.min())<=sup
-            if tr and ts:
-                stats['touch_ambiguous']+=1; ambiguous=True; break
+            if tr and ts: stats['touch_ambiguous']+=1; ambiguous=True; break
             if tr or ts:
                 touch_type='RESISTANCE' if tr else 'SUPPORT'; touch_px=res if tr else sup
                 for _,m in g.iterrows():
-                    if (tr and float(m.high)>=touch_px) or (ts and float(m.low)<=touch_px):
-                        touch_minute=m.date; break
+                    if (tr and float(m.high)>=touch_px) or (ts and float(m.low)<=touch_px): touch_minute=m.date; break
                 break
         if ambiguous: continue
-        if touch_type is None:
-            stats['no_touch']+=1; continue
-        buy,sell=gann(touch_px,.125)
-        start_idx=day.index[day.date>=touch_minute]
-        if len(start_idx)==0:
-            stats['no_trigger']+=1; continue
+        if touch_type is None: stats['no_touch']+=1; continue
+        buy,sell=gann(touch_px,.125); start_idx=day.index[day.date>=touch_minute]
+        if len(start_idx)==0: stats['no_trigger']+=1; continue
         entry_i=None; side=None
         for i in range(int(start_idx[0]),len(day)):
             b=day.iloc[i]; c=float(b.close)
-            if c>=buy:
-                entry_i=i; side='LONG'; break
-            if c<=sell:
-                entry_i=i; side='SHORT'; break
-        if entry_i is None:
-            stats['no_trigger']+=1; continue
-        eb=day.iloc[entry_i]; entry=float(eb.close)
-        stop=sell if side=='LONG' else buy; target=entry+100 if side=='LONG' else entry-100
+            if c>=buy: entry_i=i; side='LONG'; break
+            if c<=sell: entry_i=i; side='SHORT'; break
+        if entry_i is None: stats['no_trigger']+=1; continue
+        eb=day.iloc[entry_i]; entry=float(eb.close); stop=sell if side=='LONG' else buy; target=entry+100 if side=='LONG' else entry-100
         exit_px=None; exit_time=None; reason=None; amb=False
         for i in range(entry_i+1,len(day)):
-            b=day.iloc[i]
-            hit_sl=float(b.low)<=stop if side=='LONG' else float(b.high)>=stop
-            hit_t=float(b.high)>=target if side=='LONG' else float(b.low)<=target
-            if hit_sl and hit_t:
-                stats['same_bar_both']+=1; amb=True; break
-            if hit_sl:
-                exit_px=stop; exit_time=b.date; reason='SL'; break
-            if hit_t:
-                exit_px=target; exit_time=b.date; reason='TARGET'; break
+            b=day.iloc[i]; hit_sl=float(b.low)<=stop if side=='LONG' else float(b.high)>=stop; hit_t=float(b.high)>=target if side=='LONG' else float(b.low)<=target
+            if hit_sl and hit_t: stats['same_bar_both']+=1; amb=True; break
+            if hit_sl: exit_px=stop; exit_time=b.date; reason='SL'; break
+            if hit_t: exit_px=target; exit_time=b.date; reason='TARGET'; break
         if amb: continue
         if exit_px is None:
             last=day.iloc[-1]; exit_px=float(last.close); exit_time=last.date; reason='EOD'
@@ -137,12 +116,12 @@ def run_original_7750(df):
     return _summary(out,stats),out,daily,_monthly(out)
 
 def _signal(bar,side,buy,sell,mode='close'):
-    if mode=='wick':return float(bar.high)>=buy if side=='LONG' else float(bar.low)<=sell
+    if mode in ('wick','trigger'):
+        return float(bar.high)>=buy if side=='LONG' else float(bar.low)<=sell
     return float(bar.close)>=buy if side=='LONG' else float(bar.close)<=sell
 
 def run_lab(df,cfg):
-    if _is_original_7750(cfg):
-        return run_original_7750(df)
+    if _is_original_7750(cfg): return run_original_7750(df)
     d=norm(df); d['session']=d.date.dt.date
     sessions=[(k,v.drop(columns='session').reset_index(drop=True)) for k,v in d.groupby('session',sort=True)]
     out=[]; daily=[]; stats={'test_days':max(0,len(sessions)-1),'no_touch':0,'touch_ambiguous':0,'no_trigger':0,'same_bar_both':0,'engine':'flexible_lab'}
@@ -153,8 +132,7 @@ def run_lab(df,cfg):
     cost=float(cfg.get('cost_points',0) or 0); slip=float(cfg.get('slippage_points',0) or 0)
     st=cfg.get('start_time','09:15'); et=cfg.get('end_time','15:30'); sh,sm=map(int,st.split(':')); eh,em=map(int,et.split(':'))
     for di in range(1,len(sessions)):
-        sdate,day=sessions[di]; _,prev=sessions[di-1]
-        day=day[(day.date.dt.time>=time(sh,sm))&(day.date.dt.time<=time(eh,em))].reset_index(drop=True)
+        sdate,day=sessions[di]; _,prev=sessions[di-1]; day=day[(day.date.dt.time>=time(sh,sm))&(day.date.dt.time<=time(eh,em))].reset_index(drop=True)
         if day.empty: continue
         ph=float(prev.high.max()); pl=float(prev.low.min()); pc=float(prev.iloc[-1].close); wma=(ph-pl)*wma_factor; res=pc+wma; sup=pc-wma
         touch=first_touch(day,res,sup,touch_int,touch_side)
@@ -175,7 +153,9 @@ def run_lab(df,cfg):
             if side is None:
                 if not had: stats['no_trigger']+=1
                 break
-            had=True; n+=1; entry=float(entrybar.close)+(slip if side=='LONG' else -slip)
+            had=True; n+=1
+            if entry_mode=='trigger': entry=float(buy if side=='LONG' else sell)
+            else: entry=float(entrybar.close)+(slip if side=='LONG' else -slip)
             if stop_mode=='gann': stop=sell if side=='LONG' else buy
             elif stop_mode=='points': stop=entry-stop_value if side=='LONG' else entry+stop_value
             else: stop=entry*(1-stop_value/100) if side=='LONG' else entry*(1+stop_value/100)
