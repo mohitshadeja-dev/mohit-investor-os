@@ -140,15 +140,23 @@ def run_lab(df,cfg):
         if touch.get('ambiguous'): stats['touch_ambiguous']+=1; continue
         buy,sell=gann(touch['level'],gstep); sigbars=bars(day,confirm_int); sigbars=sigbars[sigbars.date>=touch['time']].reset_index(drop=True)
         n=0; cursor_time=touch['time']; had=False; day_pts=0
+        # A side becomes disarmed after it trades. It must first move back across its own trigger
+        # before that same side can enter again. This prevents repeated entries while price simply
+        # remains beyond the trigger (e.g. multiple shorts while continuously below Sell Below).
+        armed={'LONG':True,'SHORT':True}
         while True:
             if maxtr is not None and n>=maxtr: break
             cand=sigbars[sigbars.date>=cursor_time]; entrybar=None; side=None
             for _,b in cand.iterrows():
+                c=float(b.close)
+                if not armed['LONG'] and c<buy: armed['LONG']=True
+                if not armed['SHORT'] and c>sell: armed['SHORT']=True
                 checks=[]
                 if direction in ('both','long'): checks.append('LONG')
                 if direction in ('both','short'): checks.append('SHORT')
                 for sd in checks:
-                    if _signal(b,sd,buy,sell,entry_mode): entrybar=b; side=sd; break
+                    if armed[sd] and _signal(b,sd,buy,sell,entry_mode):
+                        entrybar=b; side=sd; break
                 if side: break
             if side is None:
                 if not had: stats['no_trigger']+=1
@@ -174,6 +182,8 @@ def run_lab(df,cfg):
                     break
                 if hsl: reason='SL'; ex=stop; ext=m.date; break
                 if ht: reason='TARGET'; ex=target; ext=m.date; break
+            # Once this side has traded, require a true reset before the same side can re-enter.
+            armed[side]=False
             if reason!='AMBIGUOUS':
                 pts=((ex-entry) if side=='LONG' else (entry-ex))-cost
                 tr={'date':str(sdate),'trade_no':n,'first_touch':touch['type'],'touch_time':str(touch['time']),'reference_price':round(touch['level'],2),'buy_above':buy,'sell_below':sell,'side':side,'entry_time':str(entrybar.date),'entry':round(entry,2),'stop':round(stop,2),'target':round(target,2),'exit_time':str(ext),'exit':round(ex,2),'reason':reason,'points':round(pts,2)}
