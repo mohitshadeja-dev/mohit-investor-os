@@ -224,6 +224,12 @@ def _attach_annual_report_review(result, symbol, website=None):
     result['warnings']=list(dict.fromkeys(result.get('warnings',[])+review.get('warnings',[])))
     result['annual_report']={'status':'REVIEWED','year':review['year'],'url':review['url'],
                              'findings':review['findings'],
+                             'future_visibility':{'score':overrides.get('Capacity/order visibility'),'max_score':5,
+                               'summary':'Strong' if overrides.get('Capacity/order visibility',0)>=4 else 'Moderate',
+                               'items':[{'label':'Curated capacity/order review','disclosed':True,'importance':'HIGH','page':None,
+                                         'evidence':next((f['evidence'] for f in review['findings'] if f['area']=='Capacity/order visibility'),'Reviewed in the cited annual report.')},
+                                        {'label':'Quantified order book / backlog','disclosed':False,'importance':'HIGH','page':None,
+                                         'evidence':'Not sufficiently disclosed in the reviewed annual report.'}]},
                              'message':'Qualitative scores use the cited annual report; undisclosed evidence remains unscored.'}
     result['source']=result.get('source','')+' | Annual report: '+review['url']
     result['disclaimer']='Framework research, not a recommendation. Recheck later exchange filings and current valuation before acting.'
