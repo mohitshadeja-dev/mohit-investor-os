@@ -55,6 +55,12 @@ class LiveCloseRequest(BaseModel):
     confirmation:str
 class JournalNoteRequest(BaseModel): notes:str=Field(default='',max_length=4000)
 class MasterAnalyzeRequest(BaseModel): name:str=Field(min_length=2,max_length=100)
+class WeeklyVolumeMockTradeRequest(BaseModel):
+    symbol:str=Field(min_length=1,max_length=30); company:str=Field(min_length=1,max_length=150)
+    entry_price:float=Field(gt=0); quantity:int=Field(gt=0); stop_loss:float=Field(gt=0); target:float=Field(gt=0)
+    signal_week:str=Field(default='',max_length=20); notes:str=Field(default='',max_length=2000)
+class WeeklyVolumeMockCloseRequest(BaseModel):
+    exit_price:float=Field(gt=0); notes:str=Field(default='',max_length=2000)
 
 INSTRUMENT_CACHE={'ts':0,'rows':[]}; JOBS={}
 
@@ -65,6 +71,7 @@ def jconn():
     c.execute('''CREATE TABLE IF NOT EXISTS option_data_cache(cache_key TEXT PRIMARY KEY,payload_json TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS live_spreads(spread_id TEXT PRIMARY KEY,signal_key TEXT UNIQUE,payload_json TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS live_signal_locks(signal_key TEXT PRIMARY KEY,ticket_id TEXT UNIQUE NOT NULL,status TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS weekly_volume_mock_trades(id INTEGER PRIMARY KEY AUTOINCREMENT,symbol TEXT NOT NULL,company TEXT NOT NULL,signal_week TEXT,entry_date TEXT NOT NULL,entry_price REAL NOT NULL,quantity INTEGER NOT NULL,stop_loss REAL NOT NULL,target REAL NOT NULL,status TEXT NOT NULL DEFAULT 'OPEN',exit_date TEXT,exit_price REAL,pnl REAL,notes TEXT DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
     return c
 
 def save_live_spread(spread):
@@ -134,6 +141,32 @@ def master_framework_analyze(req:MasterAnalyzeRequest):
 def weekly_volume_scanner(refresh:bool=False):
     try:return scan_lifetime_weekly_volume(force=refresh)
     except Exception as e:raise HTTPException(502,f'Weekly volume scan could not be completed: {e}')
+@app.get('/api/master-framework/weekly-volume-trades')
+def weekly_volume_mock_trades():
+    with jconn() as c:rows=[dict(r) for r in c.execute('SELECT * FROM weekly_volume_mock_trades ORDER BY CASE status WHEN \'OPEN\' THEN 0 ELSE 1 END,id DESC').fetchall()]
+    return {'items':rows}
+@app.post('/api/master-framework/weekly-volume-trades')
+def create_weekly_volume_mock_trade(req:WeeklyVolumeMockTradeRequest):
+    if req.stop_loss>=req.entry_price:raise HTTPException(400,'For a LONG mock trade, stop-loss must be below entry.')
+    if req.target<=req.entry_price:raise HTTPException(400,'For a LONG mock trade, target must be above entry.')
+    with jconn() as c:
+        cur=c.execute('''INSERT INTO weekly_volume_mock_trades(symbol,company,signal_week,entry_date,entry_price,quantity,stop_loss,target,notes) VALUES(?,?,?,?,?,?,?,?,?)''',(req.symbol.upper(),req.company,req.signal_week,datetime.now(IST).date().isoformat(),req.entry_price,req.quantity,req.stop_loss,req.target,req.notes))
+        trade_id=cur.lastrowid
+    return {'saved':True,'id':trade_id,'paper_trade':True}
+@app.put('/api/master-framework/weekly-volume-trades/{trade_id}/close')
+def close_weekly_volume_mock_trade(trade_id:int,req:WeeklyVolumeMockCloseRequest):
+    with jconn() as c:
+        row=c.execute('SELECT * FROM weekly_volume_mock_trades WHERE id=?',(trade_id,)).fetchone()
+        if not row:raise HTTPException(404,'Mock trade not found')
+        if row['status']!='OPEN':raise HTTPException(400,'Mock trade is already closed')
+        pnl=round((req.exit_price-float(row['entry_price']))*int(row['quantity']),2)
+        notes=(str(row['notes'] or '')+'\n'+req.notes).strip()
+        c.execute('''UPDATE weekly_volume_mock_trades SET status='CLOSED',exit_date=?,exit_price=?,pnl=?,notes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?''',(datetime.now(IST).date().isoformat(),req.exit_price,pnl,notes,trade_id))
+    return {'closed':True,'pnl':pnl,'paper_trade':True}
+@app.delete('/api/master-framework/weekly-volume-trades/{trade_id}')
+def delete_weekly_volume_mock_trade(trade_id:int):
+    with jconn() as c:c.execute('DELETE FROM weekly_volume_mock_trades WHERE id=?',(trade_id,))
+    return {'deleted':True}
 @app.get('/api/kite/status')
 def status():
     configured=bool(get_secret('kite_api_key') or os.getenv('KITE_API_KEY'))
