@@ -51,6 +51,7 @@ class LivePlaceRequest(LiveTicketRequest):
 class LiveCloseRequest(BaseModel):
     spread_id:str=Field(min_length=8,max_length=80)
     confirmation:str
+class JournalNoteRequest(BaseModel): notes:str=Field(default='',max_length=4000)
 
 INSTRUMENT_CACHE={'ts':0,'rows':[]}; JOBS={}
 
@@ -109,6 +110,8 @@ def journal_rows():
 
 @app.get('/')
 def home(): return FileResponse(ROOT/'static'/'index.html')
+@app.get('/research-dashboard')
+def research_dashboard(): return FileResponse(ROOT/'static'/'research-dashboard.html')
 @app.get('/health')
 def health(): return {'ok':True,'service':'mohit-strategy-lab-v3'}
 @app.get('/api/kite/status')
@@ -331,6 +334,12 @@ def live_gann(instrument_token:int=int(os.getenv('NIFTY_INSTRUMENT_TOKEN','25626
     except Exception as e:raise HTTPException(400,str(e))
 @app.get('/api/journal')
 def journal():return journal_rows()
+@app.put('/api/journal/{entry_id}/notes')
+def journal_notes(entry_id:int,req:JournalNoteRequest):
+    with jconn() as c:
+        cur=c.execute('UPDATE journal SET notes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',(req.notes,entry_id))
+        if not cur.rowcount:raise HTTPException(404,'Journal entry not found')
+    return {'ok':True,'id':entry_id}
 
 @app.post('/api/live/options/ticket')
 def live_options_ticket(req:LiveTicketRequest):
