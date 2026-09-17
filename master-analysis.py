@@ -1,10 +1,105 @@
 from __future__ import annotations
 
 import math
+import json
+import re
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 
 import pandas as pd
 import yfinance as yf
+
+
+class _PageParser(HTMLParser):
+    def __init__(self):
+        super().__init__(); self.text=[]; self.tables=[]; self.table=None; self.row=None; self.cell=None
+    def handle_starttag(self, tag, attrs):
+        if tag=='table': self.table=[]
+        elif tag=='tr' and self.table is not None: self.row=[]
+        elif tag in ('td','th') and self.row is not None: self.cell=[]
+    def handle_data(self, data):
+        value=' '.join(data.split())
+        if value:
+            self.text.append(value)
+            if self.cell is not None:self.cell.append(value)
+    def handle_endtag(self, tag):
+        if tag in ('td','th') and self.cell is not None:
+            self.row.append(' '.join(self.cell));self.cell=None
+        elif tag=='tr' and self.row is not None:
+            if self.row:self.table.append(self.row)
+            self.row=None
+        elif tag=='table' and self.table is not None:
+            self.tables.append(self.table);self.table=None
+
+
+def _download(url):
+    req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 MohitResearchOS/1.0','Accept':'text/html,application/json'})
+    return urllib.request.urlopen(req,timeout=20).read().decode('utf-8','replace')
+
+
+def _screener_symbol(name):
+    raw=name.strip().upper().replace('.NS','').replace('.BO','')
+    aliases={'INFLUX HEALTHTECH':'INFLUX','INFLUX HEALTH':'INFLUX','ADISOFT TECHNOLOGIES':'ADISOFT','ADISOFT TECHNOLOGY':'ADISOFT'}
+    if raw in aliases:return aliases[raw]
+    if ' ' not in raw and len(raw)<=20:return raw
+    try:
+        results=json.loads(_download('https://www.screener.in/api/company/search/?q='+urllib.parse.quote(name)))
+        if results:
+            url=str(results[0].get('url','')).strip('/').split('/')
+            if len(url)>=2:return url[1].upper()
+    except Exception:pass
+    return raw.replace(' ','')
+
+
+def _number(value):
+    if value is None:return None
+    found=re.search(r'-?[\d,]+(?:\.\d+)?',str(value))
+    return _finite(found.group(0).replace(',','')) if found else None
+
+
+def _table_row(tables,label):
+    for table in tables:
+        for row in table:
+            if row and row[0].replace('\xa0',' ').strip().lower().rstrip('+').strip()==label.lower():
+                return [_number(x) for x in row[1:] if _number(x) is not None]
+    return []
+
+
+def _screener_metric(text,label):
+    match=re.search(re.escape(label)+r'\s+₹?\s*([\d,]+(?:\.\d+)?)',text,re.I)
+    return _number(match.group(1)) if match else None
+
+
+def _analyze_screener(name):
+    symbol=_screener_symbol(name);url=f'https://www.screener.in/company/{symbol}/';parser=_PageParser();parser.feed(_download(url));text=' '.join(parser.text)
+    if 'Page not found' in text or not parser.tables:raise ValueError(f"Could not find an Indian listed company for '{name}'")
+    sales=_table_row(parser.tables,'Sales');profit=_table_row(parser.tables,'Net Profit');cfo=_table_row(parser.tables,'Cash from Operating Activity');fcf=_table_row(parser.tables,'Free Cash Flow');borrowings=_table_row(parser.tables,'Borrowings');equity=_table_row(parser.tables,'Equity Capital');reserves=_table_row(parser.tables,'Reserves');debtor=_table_row(parser.tables,'Debtor Days');inventory=_table_row(parser.tables,'Inventory Days');payable=_table_row(parser.tables,'Days Payable');ccc=_table_row(parser.tables,'Cash Conversion Cycle')
+    rev_cagr=_cagr(pd.Series(list(reversed(sales[-5:])))) if len(sales)>1 else None
+    pat_cagr=_cagr(pd.Series(list(reversed(profit[-5:])))) if len(profit)>1 else None
+    latest_pat=profit[-1] if profit else None;latest_cfo=cfo[-1] if cfo else None
+    roe=_screener_metric(text,'ROE');roce=_screener_metric(text,'ROCE');pe=_screener_metric(text,'Stock P/E');price=_screener_metric(text,'Current Price');mcap=_screener_metric(text,'Market Cap')
+    cfo_pat=_ratio(latest_cfo,latest_pat,100);fcf_margin=_ratio(fcf[-1] if fcf else None,sales[-1] if sales else None,100)
+    latest_equity=(equity[-1] if equity else 0)+(reserves[-1] if reserves else 0);debt_equity=_ratio(borrowings[-1] if borrowings else None,latest_equity)
+    ccc_now=ccc[-1] if ccc else None;debtor_now=debtor[-1] if debtor else None;inventory_now=inventory[-1] if inventory else None;payable_now=payable[-1] if payable else None
+    peg=_ratio(pe,pat_cagr) if pe is not None and pat_cagr and pat_cagr>0 else None
+    dimensions=[
+      ('Business quality & moat',10,_score_linear(roe,8,25,10),'ROE proxy; moat needs annual-report verification'),('TAM & reinvestment runway',10,_score_linear(rev_cagr,5,25,10),'Revenue-growth proxy; TAM needs verification'),('Revenue/PAT growth quality',8,_score_linear(min(x for x in (rev_cagr,pat_cagr) if x is not None) if any(x is not None for x in (rev_cagr,pat_cagr)) else None,5,25,8),'Reported annual growth'),('Incremental ROIC/ROCE',10,_score_linear(roce,8,25,10),'ROCE proxy'),('Cash conversion & FCF',10,_score_linear(cfo_pat,40,100,10),'CFO/PAT and FCF'),('Balance sheet',7,_score_linear(debt_equity,1.5,0,7,higher=False),'Debt/equity'),('Working capital',7,_score_linear(ccc_now,180,30,7,higher=False),'Cash-conversion cycle'),('Management & allocation',8,None,'Needs annual-report verification'),('Governance & forensics',10,None,'Needs auditor, RPT, pledge and filing verification'),('Customers & suppliers',5,None,'Needs concentration verification'),('Capacity/order visibility',5,None,'Needs order-book verification'),('Valuation & PEG',7,_score_linear(peg,2.5,.8,7,higher=False),'PEG proxy'),('Starting-base asymmetry',3,_score_linear(mcap,100000,1000,3,higher=False),'Market-cap proxy')]
+    verified=[d for d in dimensions if d[2] is not None];raw_score=round(sum(d[2] for d in verified),1);weight=sum(d[1] for d in verified);normalized=round(raw_score/weight*100,1) if weight else 0
+    warnings=[]
+    if cfo_pat is not None and cfo_pat<80:warnings.append('CFO/PAT is below the 80% framework threshold.')
+    if roe is not None and roe<20:warnings.append('ROE is below the preferred 20% threshold.')
+    if debt_equity is not None and debt_equity>1:warnings.append('Debt/equity is above 1.0.')
+    if fcf and fcf[-1]<0:warnings.append('Latest reported free cash flow is negative.')
+    available=sum(x is not None for x in [rev_cagr,pat_cagr,roe,roce,cfo_pat,fcf_margin,debt_equity,pe])
+    if weight<35 or available<5:verdict,action='DATA INCOMPLETE — NOT SCORED','Not enough verified financial data. This is not a zero score and not an Avoid verdict.'
+    elif normalized>=85 and not warnings:verdict,action='PROVISIONAL WATCHLIST','Verify governance, auditor, customers and order book before any purchase.'
+    elif normalized>=70 and len(warnings)<=2:verdict,action='DEEP RESEARCH','Financials pass the first screen, but unverified evidence blocks a Buy decision.'
+    else:verdict,action='AVOID / WAIT','The automatic financial screen is not strong enough unless new verified evidence changes it.'
+    title=re.search(r'^(.+? Ltd)',text);company=title.group(1) if title else symbol
+    metrics={'Revenue CAGR':rev_cagr,'PAT CAGR':pat_cagr,'EBITDA CAGR':None,'EPS CAGR':None,'ROE':roe,'ROCE':roce,'Incremental ROIC':None,'CFO / PAT':cfo_pat,'FCF margin':fcf_margin,'Debt / equity':debt_equity,'Interest coverage':None,'Debtor days':debtor_now,'Inventory days':inventory_now,'Payable days':payable_now,'Cash conversion cycle':ccc_now,'P/E':pe,'PEG':peg,'52-week drawdown':None}
+    return {'company':company,'symbol':symbol,'exchange':'NSE SME / BSE SME','sector':None,'industry':None,'price':price,'market_cap_crore':mcap,'week_52_high':None,'week_52_low':None,'currency':'INR','metrics':metrics,'dimensions':[{'name':n,'weight':w,'score':s,'basis':b} for n,w,s,b in dimensions],'raw_score':raw_score,'verified_weight':weight,'normalized_financial_score':normalized,'data_coverage':round(available/8*100),'available_metrics':available,'verdict':verdict,'action':action,'warnings':warnings,'unverified':[d[0] for d in dimensions if d[2] is None],'source':f'Screener public financial tables and exchange-linked documents — {url}','fetched_at':datetime.now(timezone.utc).isoformat(),'disclaimer':'Automatic screening is not a recommendation. Exchange filings and annual reports remain the source of truth.'}
 
 
 def _finite(value):
@@ -75,13 +170,16 @@ def _resolve_company(name: str):
 
 def analyze_company(name: str):
     symbol, searched_name = _resolve_company(name)
-    ticker = yf.Ticker(symbol)
-    info = ticker.get_info() or {}
-    income = ticker.income_stmt
-    balance = ticker.balance_sheet
-    cashflow = ticker.cashflow
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.get_info() or {}
+        income = ticker.income_stmt
+        balance = ticker.balance_sheet
+        cashflow = ticker.cashflow
+    except Exception:
+        return _analyze_screener(symbol)
     if income is None or income.empty or balance is None or balance.empty:
-        raise ValueError(f"Could not find an Indian listed company for '{name}'")
+        return _analyze_screener(symbol)
 
     revenue = _row(income, "Total Revenue", "Operating Revenue")
     net_income = _row(income, "Net Income", "Net Income Common Stockholders")
