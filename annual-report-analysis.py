@@ -88,6 +88,12 @@ def _evidence(pages,patterns):
     return None
 
 
+def _visibility_item(label,evidence,importance):
+    return {'label':label,'disclosed':bool(evidence),'importance':importance,
+            'page':evidence.get('page') if evidence else None,
+            'evidence':evidence.get('excerpt') if evidence else 'Not found in the latest annual report.'}
+
+
 def analyze_annual_report(url):
     pages=_extract_pdf(url); all_text=' '.join(t for _,t in pages)
     years=[int(y) for y in re.findall(r'(?:annual report|financial year|year ended)[^\n]{0,50}(20\d{2})',all_text,re.I)]
@@ -97,7 +103,13 @@ def analyze_annual_report(url):
     controls=_evidence(pages,[r'internal financial controls.{0,120}operating effectively',r'adequate internal financial controls'])
     rpt=_evidence(pages,[r'related party transactions?',r'related party disclosure'])
     allocation=_evidence(pages,[r'capital allocation',r'capital expenditure',r'capex',r'expansion programme',r'new facility'])
-    capacity=_evidence(pages,[r'order book',r'capacity expansion',r'capacity utilisation',r'new facility'])
+    order_book=_evidence(pages,[r'order book',r'order backlog',r'unexecuted order',r'orders? in hand'])
+    contracts=_evidence(pages,[r'letter of intent',r'letter of award',r'awarded contract',r'purchase orders?',r'long[- ]term contract'])
+    capacity=_evidence(pages,[r'capacity expansion',r'capacity utilisation',r'new facility',r'greenfield',r'brownfield'])
+    capex=_evidence(pages,[r'capital expenditure',r'capex',r'investment programme'])
+    outlook=_evidence(pages,[r'management outlook',r'business outlook',r'future outlook',r'growth outlook',r'demand outlook'])
+    pipeline=_evidence(pages,[r'product pipeline',r'new product launch',r'commerciali[sz]ation',r'research and development pipeline'])
+    exports=_evidence(pages,[r'export market',r'geographical expansion',r'international expansion',r'overseas market'])
     concentration=_evidence(pages,[r'customer concentration',r'(?:top|largest) (?:five|ten|5|10) customers',r'major customer.{0,80}%'])
     findings=[];scores={}
     if audit:
@@ -109,25 +121,37 @@ def analyze_annual_report(url):
     if allocation:
         scores['Management & allocation']=5.0
         findings.append({'area':'Management & allocation','status':'VERIFY','page':allocation['page'],'evidence':allocation['excerpt']})
-    if capacity:
-        scores['Capacity/order visibility']=3.0
-        findings.append({'area':'Capacity/order visibility','status':'VERIFY','page':capacity['page'],'evidence':capacity['excerpt']})
+    visibility=[_visibility_item('Order book / backlog',order_book,'HIGH'),
+                _visibility_item('Awarded contracts / purchase orders',contracts,'HIGH'),
+                _visibility_item('Capacity expansion / utilisation',capacity,'HIGH'),
+                _visibility_item('Committed capex',capex,'MEDIUM'),
+                _visibility_item('Management demand outlook',outlook,'MEDIUM'),
+                _visibility_item('Product pipeline / launches',pipeline,'MEDIUM'),
+                _visibility_item('Export / geographic expansion',exports,'MEDIUM')]
+    visibility_points=(2.0 if order_book else 0)+(1.0 if contracts else 0)+(1.0 if capacity else 0)+(.5 if capex else 0)+(.5 if any((outlook,pipeline,exports)) else 0)
+    if visibility_points:
+        scores['Capacity/order visibility']=min(5.0,visibility_points)
+        best=order_book or contracts or capacity or capex or outlook or pipeline or exports
+        findings.append({'area':'Orders & future visibility','status':'POSITIVE' if order_book else 'VERIFY','page':best['page'],'evidence':best['excerpt']})
     if concentration:
         scores['Customers & suppliers']=2.5
         findings.append({'area':'Customers & suppliers','status':'VERIFY','page':concentration['page'],'evidence':concentration['excerpt']})
     warnings=[]
     if qualified:warnings.append('Annual report contains qualified/adverse-opinion language requiring manual auditor-note review.')
+    if not order_book:warnings.append('No quantified order book/backlog was found in the latest annual report.')
     if not concentration:warnings.append('Annual report did not yield reliable customer-concentration evidence; this dimension remains unscored.')
     return {'status':'AUTO_REVIEWED','year':year,'url':url,'pages_read':len(pages),'scores':scores,'findings':findings,
+            'future_visibility':{'score':scores.get('Capacity/order visibility'),'max_score':5,'items':visibility,
+                                 'summary':'Strong' if visibility_points>=4 else ('Moderate' if visibility_points>=2.5 else 'Limited')},
             'warnings':warnings,'message':'Full PDF text was scanned automatically. Page excerpts are evidence leads; verify the cited pages before investing.'}
 
 
 def discover_and_analyze(website):
     try:
         url=discover_annual_report(website)
-        if not url:return {'status':'NOT_FOUND','year':None,'url':None,'findings':[],'scores':{},'warnings':[],
+        if not url:return {'status':'NOT_FOUND','year':None,'url':None,'findings':[],'scores':{},'warnings':[],'future_visibility':None,
                            'message':'No official annual-report PDF was found automatically on the company website.'}
         return analyze_annual_report(url)
     except Exception as exc:
-        return {'status':'ERROR','year':None,'url':None,'findings':[],'scores':{},'warnings':[],
+        return {'status':'ERROR','year':None,'url':None,'findings':[],'scores':{},'warnings':[],'future_visibility':None,
                 'message':f'Annual-report scan could not complete: {exc}'}
