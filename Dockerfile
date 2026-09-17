@@ -22,6 +22,7 @@ COPY live-trading-window.js /app/live-trading-window.js
 COPY journal-diary.js /app/journal-diary.js
 COPY master-framework.js /app/master-framework.js
 COPY master-analysis.py /app/master-analysis.py
+COPY annual-report-analysis.py /app/annual-report-analysis.py
 COPY live-signal-7575.py /app/live-signal-7575.py
 COPY inject-lab.py /app/inject-lab.py
 RUN apt-get update && apt-get install -y unzip && \
@@ -47,9 +48,10 @@ RUN apt-get update && apt-get install -y unzip && \
     cp /app/journal-diary.js /app/app/static/journal-diary.js && \
     cp /app/master-framework.js /app/app/static/master-framework.js && \
     cp /app/master-analysis.py /app/app/master_analysis.py && \
+    cp /app/annual-report-analysis.py /app/app/annual_report_analysis.py && \
     cp /app/live-signal-7575.py /app/app/live_signal_7575.py && \
     python /app/inject-lab.py && \
-    pip install --no-cache-dir -r /app/requirements.txt yfinance && \
+    pip install --no-cache-dir -r /app/requirements.txt yfinance pypdf && \
     mv /usr/local/bin/uvicorn /usr/local/bin/uvicorn-real && \
     printf '%s\n' '#!/bin/sh' \
       'args=""' \
