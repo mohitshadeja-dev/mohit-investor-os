@@ -20,6 +20,7 @@ COPY stockmock-worklist.js /app/stockmock-worklist.js
 COPY live-execution.py /app/live-execution.py
 COPY live-trading-window.js /app/live-trading-window.js
 COPY journal-diary.js /app/journal-diary.js
+COPY master-framework.js /app/master-framework.js
 COPY live-signal-7575.py /app/live-signal-7575.py
 COPY inject-lab.py /app/inject-lab.py
 RUN apt-get update && apt-get install -y unzip && \
@@ -43,6 +44,7 @@ RUN apt-get update && apt-get install -y unzip && \
     cp /app/live-execution.py /app/app/live_execution.py && \
     cp /app/live-trading-window.js /app/app/static/live-trading-window.js && \
     cp /app/journal-diary.js /app/app/static/journal-diary.js && \
+    cp /app/master-framework.js /app/app/static/master-framework.js && \
     cp /app/live-signal-7575.py /app/app/live_signal_7575.py && \
     python /app/inject-lab.py && \
     pip install --no-cache-dir -r /app/requirements.txt && \
