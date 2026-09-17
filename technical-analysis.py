@@ -52,7 +52,9 @@ def analyze_technical(symbol):
     ticker=str(symbol or '').upper()
     if not ticker.endswith(('.NS','.BO')):ticker+='.NS'
     try:
-        df=yf.download(ticker,period='18mo',interval='1d',auto_adjust=False,progress=False,threads=False)
+        # Use the full available daily history so all-time price and weekly
+        # volume records are genuine lifetime statistics, not 18-month proxies.
+        df=yf.download(ticker,period='max',interval='1d',auto_adjust=False,progress=False,threads=False)
         if isinstance(df.columns,pd.MultiIndex):df.columns=df.columns.get_level_values(0)
         df=df.dropna(subset=['Open','High','Low','Close']).copy()
         if len(df)<30:raise ValueError('fewer than 30 daily candles are available')
@@ -62,11 +64,24 @@ def analyze_technical(symbol):
         breakout=bool(prior20 and float(last.Close)>prior20)
         volume_confirmed=bool(breakout and volume_ratio is not None and volume_ratio>=1.5)
         high52=float(df.High.tail(252).max());low52=float(df.Low.tail(252).min());close=float(last.Close)
+        all_time_high=float(df.High.max());all_time_high_date=df.High.idxmax()
+        points_below_ath=max(0.0,all_time_high-close)
+        weekly=df[['Volume']].resample('W-FRI').sum(min_count=1).dropna()
+        weekly_peak=float(weekly.Volume.max()) if len(weekly) else None
+        weekly_peak_date=weekly.Volume.idxmax() if len(weekly) else None
+        latest_week_volume=float(weekly.Volume.iloc[-1]) if len(weekly) else None
+        latest_week_ratio=(latest_week_volume/weekly_peak) if weekly_peak else None
+        latest_is_record=bool(weekly_peak and latest_week_volume>=weekly_peak*.999999)
         rows=[]
         for idx,row in df.tail(180).iterrows():
             rows.append({'date':idx.strftime('%Y-%m-%d'),'open':_f(row.Open),'high':_f(row.High),'low':_f(row.Low),'close':_f(row.Close),'volume':_f(row.Volume),'ma20':_f(row.MA20),'ma50':_f(row.MA50),'ma200':_f(row.MA200)})
         return {'status':'READY','symbol':ticker,'candles':rows,'updated_at':datetime.now(timezone.utc).isoformat(),
           'summary':{'close':close,'high_52w':high52,'low_52w':low52,'distance_from_52w_high_pct':round((close/high52-1)*100,2),
+            'all_time_high':all_time_high,'all_time_high_date':all_time_high_date.strftime('%Y-%m-%d'),
+            'points_below_all_time_high':round(points_below_ath,2),'distance_from_all_time_high_pct':round((close/all_time_high-1)*100,2),
+            'highest_weekly_volume':weekly_peak,'highest_weekly_volume_date':weekly_peak_date.strftime('%Y-%m-%d') if weekly_peak_date is not None else None,
+            'latest_weekly_volume':latest_week_volume,'latest_week_vs_record_pct':round(latest_week_ratio*100,1) if latest_week_ratio is not None else None,
+            'latest_week_is_lifetime_volume_high':latest_is_record,
             'ma20':_f(last.MA20),'ma50':_f(last.MA50),'ma200':_f(last.MA200),'above_ma20':bool(_f(last.MA20) and close>last.MA20),'above_ma50':bool(_f(last.MA50) and close>last.MA50),'above_ma200':bool(_f(last.MA200) and close>last.MA200),
             'breakout_20d':breakout,'breakout_level':prior20,'volume_ratio_20d':round(volume_ratio,2) if volume_ratio is not None else None,'volume_confirmed':volume_confirmed,
             'breakout_message':('Confirmed 20-day breakout with higher volume.' if volume_confirmed else ('Price breakout detected, but volume is below the 1.5× confirmation rule.' if breakout else 'No confirmed 20-day breakout.'))},
