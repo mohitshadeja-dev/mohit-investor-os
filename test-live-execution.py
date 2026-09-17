@@ -30,7 +30,7 @@ class FakeKite:
 def test_preview_never_places_and_hedge_goes_first():
     k=FakeKite();ticket=m.build_ticket(k,'SHORT',650,.70,.30)
     assert ticket['option_type']=='CE' and not k.placed
-    placed=m.place_spread(k,ticket['ticket_id'],'SHORT',650,.70,.30,'PLACE')
+    placed=m.place_spread(k,ticket['ticket_id'],'SHORT',650,.70,.30,'PLACE 650')
     assert placed['status']=='ORDERS_SENT'
     assert k.placed[0]['transaction_type']=='BUY'
     assert k.placed[1]['transaction_type']=='SELL'
@@ -43,10 +43,20 @@ def test_long_uses_puts_and_quantity_must_match_lot():
     else:raise AssertionError('invalid quantity accepted')
 
 def test_exit_buys_short_first_then_sells_hedge():
-    k=FakeKite();ticket=m.build_ticket(k,'SHORT',650,.70,.30);spread=m.place_spread(k,ticket['ticket_id'],'SHORT',650,.70,.30,'PLACE')
+    k=FakeKite();ticket=m.build_ticket(k,'SHORT',650,.70,.30);spread=m.place_spread(k,ticket['ticket_id'],'SHORT',650,.70,.30,'PLACE 650')
     m.close_spread_record(k,spread)
     assert k.placed[2]['transaction_type']=='BUY'
     assert k.placed[2]['tradingsymbol']==spread['short_leg']['tradingsymbol']
     assert k.placed[3]['transaction_type']=='SELL'
     assert k.placed[3]['tradingsymbol']==spread['hedge_leg']['tradingsymbol']
     assert spread['status']=='CLOSED'
+
+def test_confirmation_includes_exact_quantity_and_ticket_cannot_repeat():
+    k=FakeKite();ticket=m.build_ticket(k,'SHORT',650,.70,.30)
+    try:m.place_spread(k,ticket['ticket_id'],'SHORT',650,.70,.30,'PLACE')
+    except m.LiveOrderError as e:assert 'PLACE 650' in str(e)
+    else:raise AssertionError('weak confirmation accepted')
+    m.place_spread(k,ticket['ticket_id'],'SHORT',650,.70,.30,'PLACE 650')
+    try:m.place_spread(k,ticket['ticket_id'],'SHORT',650,.70,.30,'PLACE 650')
+    except m.LiveOrderError as e:assert 'already' in str(e)
+    else:raise AssertionError('duplicate ticket accepted')
