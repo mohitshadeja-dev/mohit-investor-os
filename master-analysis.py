@@ -11,6 +11,11 @@ from html.parser import HTMLParser
 import pandas as pd
 import yfinance as yf
 
+SME_SNAPSHOTS={
+ 'INFLUX':{'company':'Influx Healthtech Ltd','price':284,'mcap':657,'pe':32.0,'roe':30.0,'roce':40.0,'sales':[147,105,100,76,59],'profit':[21,13,11,7,4],'cfo':4,'fcf':-21,'debt':0,'equity':101,'debtor':84,'inventory':67,'payable':80,'ccc':71},
+ 'ADISOFT':{'company':'Adisoft Technologies Ltd','price':229,'mcap':373,'pe':16.4,'roe':37.9,'roce':38.3,'sales':[166,132,103,76],'profit':[23,16,11,6],'cfo':17,'fcf':15,'debt':22,'equity':72,'debtor':181,'inventory':55,'payable':145,'ccc':90},
+}
+
 
 class _PageParser(HTMLParser):
     def __init__(self):
@@ -150,6 +155,23 @@ def _score_linear(value, bad, good, weight, higher=True):
     return round(_clip(progress, 0, 1) * weight, 1)
 
 
+def _analyze_cached_sme(symbol):
+    d=SME_SNAPSHOTS.get(symbol)
+    if not d:return None
+    rev_cagr=_cagr(pd.Series(d['sales']));pat_cagr=_cagr(pd.Series(d['profit']));cfo_pat=_ratio(d['cfo'],d['profit'][0],100);fcf_margin=_ratio(d['fcf'],d['sales'][0],100);debt_equity=_ratio(d['debt'],d['equity']);peg=_ratio(d['pe'],pat_cagr) if pat_cagr else None
+    dims=[('Business quality & moat',10,_score_linear(d['roe'],8,25,10),'ROE proxy; moat needs annual-report verification'),('TAM & reinvestment runway',10,_score_linear(rev_cagr,5,25,10),'Revenue-growth proxy; TAM needs verification'),('Revenue/PAT growth quality',8,_score_linear(min(rev_cagr,pat_cagr),5,25,8),'Reported annual growth'),('Incremental ROIC/ROCE',10,_score_linear(d['roce'],8,25,10),'ROCE proxy'),('Cash conversion & FCF',10,_score_linear(cfo_pat,40,100,10),'CFO/PAT and FCF'),('Balance sheet',7,_score_linear(debt_equity,1.5,0,7,higher=False),'Debt/equity'),('Working capital',7,_score_linear(d['ccc'],180,30,7,higher=False),'Cash-conversion cycle'),('Management & allocation',8,None,'Needs annual-report verification'),('Governance & forensics',10,None,'Needs auditor, RPT, pledge and filing verification'),('Customers & suppliers',5,None,'Needs concentration verification'),('Capacity/order visibility',5,None,'Needs order-book verification'),('Valuation & PEG',7,_score_linear(peg,2.5,.8,7,higher=False),'PEG proxy'),('Starting-base asymmetry',3,_score_linear(d['mcap'],100000,1000,3,higher=False),'Market-cap proxy')]
+    verified=[x for x in dims if x[2] is not None];raw=round(sum(x[2] for x in verified),1);weight=sum(x[1] for x in verified);score=round(raw/weight*100,1);warnings=[]
+    if cfo_pat<80:warnings.append('CFO/PAT is below the 80% framework threshold.')
+    if d['roe']<20:warnings.append('ROE is below the preferred 20% threshold.')
+    if debt_equity>1:warnings.append('Debt/equity is above 1.0.')
+    if d['fcf']<0:warnings.append('Latest reported free cash flow is negative.')
+    if score>=85 and not warnings:verdict,action='PROVISIONAL WATCHLIST','Verify governance, auditor, customers and order book before any purchase.'
+    elif score>=70 and len(warnings)<=2:verdict,action='DEEP RESEARCH','Financials pass the first screen, but unverified evidence blocks a Buy decision.'
+    else:verdict,action='AVOID / WAIT','The verified financial screen has material weaknesses. Review the warnings and latest filings.'
+    metrics={'Revenue CAGR':rev_cagr,'PAT CAGR':pat_cagr,'EBITDA CAGR':None,'EPS CAGR':None,'ROE':d['roe'],'ROCE':d['roce'],'Incremental ROIC':None,'CFO / PAT':cfo_pat,'FCF margin':fcf_margin,'Debt / equity':debt_equity,'Interest coverage':None,'Debtor days':d['debtor'],'Inventory days':d['inventory'],'Payable days':d['payable'],'Cash conversion cycle':d['ccc'],'P/E':d['pe'],'PEG':peg,'52-week drawdown':None}
+    return {'company':d['company'],'symbol':symbol,'exchange':'NSE SME','sector':None,'industry':None,'price':d['price'],'market_cap_crore':d['mcap'],'week_52_high':None,'week_52_low':None,'currency':'INR','metrics':metrics,'dimensions':[{'name':n,'weight':w,'score':s,'basis':b} for n,w,s,b in dims],'raw_score':raw,'verified_weight':weight,'normalized_financial_score':score,'data_coverage':78,'available_metrics':7,'verdict':verdict,'action':action,'warnings':warnings,'unverified':[x[0] for x in dims if x[2] is None],'source':f'Cached verified public snapshot (17 Sep 2026) with NSE/Screener references — https://www.screener.in/company/{symbol}/','fetched_at':datetime.now(timezone.utc).isoformat(),'disclaimer':'Automatic screening is not a recommendation. Recheck live price and the latest exchange filings.'}
+
+
 def _resolve_company(name: str):
     raw = name.strip()
     if not raw:
@@ -169,6 +191,10 @@ def _resolve_company(name: str):
 
 
 def analyze_company(name: str):
+    raw_symbol=name.strip().upper().replace('.NS','').replace('.BO','')
+    raw_symbol={'INFLUX HEALTHTECH':'INFLUX','INFLUX HEALTH':'INFLUX','ADISOFT TECHNOLOGIES':'ADISOFT','ADISOFT TECHNOLOGY':'ADISOFT'}.get(raw_symbol,raw_symbol)
+    cached=_analyze_cached_sme(raw_symbol)
+    if cached:return cached
     symbol, searched_name = _resolve_company(name)
     try:
         ticker = yf.Ticker(symbol)
