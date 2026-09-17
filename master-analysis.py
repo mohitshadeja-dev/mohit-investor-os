@@ -16,6 +16,32 @@ SME_SNAPSHOTS={
  'ADISOFT':{'company':'Adisoft Technologies Ltd','price':229,'mcap':373,'pe':16.4,'roe':37.9,'roce':38.3,'sales':[166,132,103,76],'profit':[23,16,11,6],'cfo':17,'fcf':15,'debt':22,'equity':72,'debtor':181,'inventory':55,'payable':145,'ccc':90},
 }
 
+# Human-reviewed annual-report evidence.  These entries are deliberately
+# separate from market-data snapshots: every scored qualitative dimension has
+# a primary-source report, report year, and an explicit evidence trail.
+ANNUAL_REPORT_REVIEWS={
+ 'ADISOFT':{
+  'year':'2025-26','url':'https://www.adisoft.co.in/img/Adisoft_Annual_Report_2025-26.pdf',
+  'scores':{'Management & allocation':7.0,'Governance & forensics':7.5,'Capacity/order visibility':4.5},
+  'findings':[
+   {'area':'Management & allocation','status':'POSITIVE','evidence':'FY26 total income ₹169.33 crore (+26.7%) and net profit ₹22.80 crore (+42.9%); capital is being deployed into a new integrated Pune facility.'},
+   {'area':'Governance & forensics','status':'WATCH','evidence':'Auditor reports a true-and-fair opinion and effective internal financial controls; related-party transactions were disclosed as arm’s length. The Rule 11(g) audit-trail exception still requires follow-up.'},
+   {'area':'Capacity/order visibility','status':'POSITIVE','evidence':'Annual report identifies a 70,000 sq ft integrated facility under construction. Capacity evidence exists, but a quantified order book was not disclosed.'},
+   {'area':'Customers & suppliers','status':'UNVERIFIED','evidence':'The report cites 950+ customers, but does not provide enough concentration data to score dependence risk.'},
+  ],
+  'warnings':['Annual-report follow-up: verify the Rule 11(g) audit-trail exception and quantify customer concentration.']},
+ 'INFLUX':{
+  'year':'2024-25','url':'https://influxhealthtech.com/wp-content/uploads/2025/08/080825_IHL_Annual-Report_Final.pdf',
+  'scores':{'Management & allocation':6.5,'Governance & forensics':6.5,'Capacity/order visibility':4.0},
+  'findings':[
+   {'area':'Management & allocation','status':'WATCH','evidence':'The company disclosed that it was operating at maximum capacity and planned material equipment additions; working-capital intensity needs monitoring.'},
+   {'area':'Governance & forensics','status':'WATCH','evidence':'The Board states there were no audit qualifications or adverse remarks and that related-party transactions were arm’s length. Purchases from related party Trusan Printpack require continued monitoring.'},
+   {'area':'Capacity/order visibility','status':'POSITIVE','evidence':'The report itemises proposed production equipment and rated capacities, supporting a capacity-expansion programme; it does not establish a firm order book.'},
+   {'area':'Customers & suppliers','status':'UNVERIFIED','evidence':'The report does not provide sufficient customer-concentration disclosure for a reliable score.'},
+  ],
+  'warnings':['Annual-report follow-up: quantify related-party purchases, working-capital funding and customer concentration.']},
+}
+
 
 class _PageParser(HTMLParser):
     def __init__(self):
@@ -155,6 +181,37 @@ def _score_linear(value, bad, good, weight, higher=True):
     return round(_clip(progress, 0, 1) * weight, 1)
 
 
+def _attach_annual_report_review(result, symbol):
+    """Merge only primary-source, human-reviewed annual-report evidence."""
+    key=str(symbol or '').upper().replace('.NS','').replace('.BO','')
+    review=ANNUAL_REPORT_REVIEWS.get(key)
+    if not review:
+        result['annual_report']={'status':'NOT_REVIEWED','year':None,'url':None,'findings':[],
+                                 'message':'No annual report has been reviewed for this company yet.'}
+        result['combined_framework_score']=None
+        return result
+    overrides=review['scores']
+    for item in result['dimensions']:
+        if item['name'] in overrides:
+            item['score']=overrides[item['name']]
+            item['basis']=f"Annual report {review['year']} — primary-source review"
+    verified=[d for d in result['dimensions'] if d.get('score') is not None]
+    raw=round(sum(float(d['score']) for d in verified),1)
+    weight=sum(float(d['weight']) for d in verified)
+    result['raw_score']=raw
+    result['verified_weight']=weight
+    result['combined_framework_score']=round(raw/weight*100,1) if weight else None
+    result['normalized_financial_score']=result['combined_framework_score']
+    result['unverified']=[d['name'] for d in result['dimensions'] if d.get('score') is None]
+    result['warnings']=list(dict.fromkeys(result.get('warnings',[])+review.get('warnings',[])))
+    result['annual_report']={'status':'REVIEWED','year':review['year'],'url':review['url'],
+                             'findings':review['findings'],
+                             'message':'Qualitative scores use the cited annual report; undisclosed evidence remains unscored.'}
+    result['source']=result.get('source','')+' | Annual report: '+review['url']
+    result['disclaimer']='Framework research, not a recommendation. Recheck later exchange filings and current valuation before acting.'
+    return result
+
+
 def _analyze_cached_sme(symbol):
     d=SME_SNAPSHOTS.get(symbol)
     if not d:return None
@@ -169,7 +226,8 @@ def _analyze_cached_sme(symbol):
     elif score>=70 and len(warnings)<=2:verdict,action='DEEP RESEARCH','Financials pass the first screen, but unverified evidence blocks a Buy decision.'
     else:verdict,action='AVOID / WAIT','The verified financial screen has material weaknesses. Review the warnings and latest filings.'
     metrics={'Revenue CAGR':rev_cagr,'PAT CAGR':pat_cagr,'EBITDA CAGR':None,'EPS CAGR':None,'ROE':d['roe'],'ROCE':d['roce'],'Incremental ROIC':None,'CFO / PAT':cfo_pat,'FCF margin':fcf_margin,'Debt / equity':debt_equity,'Interest coverage':None,'Debtor days':d['debtor'],'Inventory days':d['inventory'],'Payable days':d['payable'],'Cash conversion cycle':d['ccc'],'P/E':d['pe'],'PEG':peg,'52-week drawdown':None}
-    return {'company':d['company'],'symbol':symbol,'exchange':'NSE SME','sector':None,'industry':None,'price':d['price'],'market_cap_crore':d['mcap'],'week_52_high':None,'week_52_low':None,'currency':'INR','metrics':metrics,'dimensions':[{'name':n,'weight':w,'score':s,'basis':b} for n,w,s,b in dims],'raw_score':raw,'verified_weight':weight,'normalized_financial_score':score,'data_coverage':78,'available_metrics':7,'verdict':verdict,'action':action,'warnings':warnings,'unverified':[x[0] for x in dims if x[2] is None],'source':f'Cached verified public snapshot (17 Sep 2026) with NSE/Screener references — https://www.screener.in/company/{symbol}/','fetched_at':datetime.now(timezone.utc).isoformat(),'disclaimer':'Automatic screening is not a recommendation. Recheck live price and the latest exchange filings.'}
+    result={'company':d['company'],'symbol':symbol,'exchange':'NSE SME','sector':None,'industry':None,'price':d['price'],'market_cap_crore':d['mcap'],'week_52_high':None,'week_52_low':None,'currency':'INR','metrics':metrics,'dimensions':[{'name':n,'weight':w,'score':s,'basis':b} for n,w,s,b in dims],'raw_score':raw,'verified_weight':weight,'normalized_financial_score':score,'data_coverage':78,'available_metrics':7,'verdict':verdict,'action':action,'warnings':warnings,'unverified':[x[0] for x in dims if x[2] is None],'source':f'Cached verified public snapshot (17 Sep 2026) with NSE/Screener references — https://www.screener.in/company/{symbol}/','fetched_at':datetime.now(timezone.utc).isoformat(),'disclaimer':'Automatic screening is not a recommendation. Recheck live price and the latest exchange filings.'}
+    return _attach_annual_report_review(result,symbol)
 
 
 def _resolve_company(name: str):
@@ -306,7 +364,7 @@ def analyze_company(name: str):
         "Debtor days": debtor_days, "Inventory days": inventory_days, "Payable days": payable_days,
         "Cash conversion cycle": ccc, "P/E": pe, "PEG": peg, "52-week drawdown": drawdown,
     }
-    return {
+    result = {
         "company": info.get("longName") or info.get("shortName") or searched_name,
         "symbol": symbol, "exchange": info.get("exchange") or "India", "sector": info.get("sector"),
         "industry": info.get("industry"), "price": price, "market_cap_crore": market_cap / 10_000_000 if market_cap else None,
@@ -320,3 +378,4 @@ def analyze_company(name: str):
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "disclaimer": "Automatic screening is not a recommendation. Exchange filings and annual reports remain the source of truth.",
     }
+    return _attach_annual_report_review(result, symbol)
