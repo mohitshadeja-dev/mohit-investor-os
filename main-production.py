@@ -18,6 +18,7 @@ from .options_backtest import run_options_backtest
 from .live_execution import LiveOrderError, build_ticket, ticket_snapshot, place_spread, close_spread, close_spread_record, order_book
 from .live_signal_7575 import scan_live_7575
 from .master_analysis import analyze_company
+from .weekly_volume_scanner import scan_lifetime_weekly_volume
 
 ROOT=Path(__file__).resolve().parent
 DB=Path(os.getenv('APP_DB_PATH','./mohit_os.db'))
@@ -119,13 +120,20 @@ def health(): return {'ok':True,'service':'mohit-strategy-lab-v3'}
 @app.post('/api/master-framework/analyze')
 def master_framework_analyze(req:MasterAnalyzeRequest):
     try:
-        # Keep the submitted name intact so verified SME snapshots are checked
-        # before any external symbol lookup or network request.
+        # Pass the user's company name through unchanged.  The master analyzer
+        # owns name/symbol resolution and checks its verified SME snapshots
+        # before using any network data source.  Resolving here via Kite can
+        # turn SME symbols (for example ADISOFT) into a different trading
+        # symbol and bypass the reliable cached fallback.
         result=analyze_company(req.name)
         result['requested_name']=req.name
         return result
     except ValueError as e:raise HTTPException(404,str(e))
     except Exception as e:raise HTTPException(502,f'Financial data could not be loaded: {e}')
+@app.get('/api/master-framework/weekly-volume-scanner')
+def weekly_volume_scanner(refresh:bool=False):
+    try:return scan_lifetime_weekly_volume(force=refresh)
+    except Exception as e:raise HTTPException(502,f'Weekly volume scan could not be completed: {e}')
 @app.get('/api/kite/status')
 def status():
     configured=bool(get_secret('kite_api_key') or os.getenv('KITE_API_KEY'))
