@@ -156,9 +156,19 @@ def build_ticket(kite, signal: str, quantity: int, sell_delta: float = .70, buy_
         return ticket
 
 
+def ticket_snapshot(ticket_id: str) -> dict:
+    """Return the server-side ticket used for placement validation."""
+    with LOCK:
+        ticket = TICKETS.get(ticket_id)
+        if not ticket:
+            raise LiveOrderError("Ticket not found or expired; prepare it again")
+        return dict(ticket)
+
+
 def place_spread(kite, ticket_id: str, signal: str, quantity: int, sell_delta: float, buy_delta: float, confirmation: str) -> dict:
-    if confirmation.strip().upper() != "PLACE":
-        raise LiveOrderError('Type PLACE in the confirmation box')
+    required_confirmation = f"PLACE {quantity}"
+    if confirmation.strip().upper() != required_confirmation:
+        raise LiveOrderError(f'Type {required_confirmation} in the confirmation box')
     with LOCK:
         ticket = TICKETS.get(ticket_id)
         if not ticket:
