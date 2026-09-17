@@ -15,7 +15,7 @@ from .kite_service import login_url, exchange_request_token, profile, fetch_minu
 from .strategy import run_backtest, _norm, _daily_hlc, _first_touch_5m, gann_levels
 from .strategy_lab import run_lab
 from .options_backtest import run_options_backtest
-from .live_execution import LiveOrderError, build_ticket, place_spread, close_spread, close_spread_record, order_book
+from .live_execution import LiveOrderError, build_ticket, ticket_snapshot, place_spread, close_spread, close_spread_record, order_book
 from .live_signal_7575 import scan_live_7575
 
 ROOT=Path(__file__).resolve().parent
@@ -42,7 +42,7 @@ class OptionsBacktestRequest(BaseModel):
     quantity:int=Field(default=1300,gt=0)
 class LiveTicketRequest(BaseModel):
     signal:str
-    quantity:int=Field(default=650,gt=0)
+    quantity:int=Field(default=65,gt=0)
     sell_delta:float=Field(default=.70,gt=.5,lt=1)
     buy_delta:float=Field(default=.30,gt=0,lt=.5)
 class LivePlaceRequest(LiveTicketRequest):
@@ -60,10 +60,27 @@ def jconn():
     c.execute('''CREATE TABLE IF NOT EXISTS saved_backtests(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,symbol TEXT,config_json TEXT,summary_json TEXT,trades_json TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS option_data_cache(cache_key TEXT PRIMARY KEY,payload_json TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS live_spreads(spread_id TEXT PRIMARY KEY,signal_key TEXT UNIQUE,payload_json TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS live_signal_locks(signal_key TEXT PRIMARY KEY,ticket_id TEXT UNIQUE NOT NULL,status TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
     return c
 
 def save_live_spread(spread):
-    with jconn() as c:c.execute('''INSERT OR REPLACE INTO live_spreads(spread_id,signal_key,payload_json,status,updated_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP)''',(spread['spread_id'],spread.get('signal_key'),json.dumps(spread),spread.get('status','UNKNOWN')))
+    with jconn() as c:c.execute('''INSERT INTO live_spreads(spread_id,signal_key,payload_json,status,updated_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(spread_id) DO UPDATE SET payload_json=excluded.payload_json,status=excluded.status,updated_at=CURRENT_TIMESTAMP''',(spread['spread_id'],spread.get('signal_key'),json.dumps(spread),spread.get('status','UNKNOWN')))
+
+def signal_already_used(signal_key:str)->bool:
+    with jconn() as c:
+        return bool(c.execute('SELECT 1 FROM live_signal_locks WHERE signal_key=?',(signal_key,)).fetchone() or
+                    c.execute('SELECT 1 FROM live_spreads WHERE signal_key=?',(signal_key,)).fetchone())
+
+def claim_live_signal(signal_key:str,ticket_id:str):
+    try:
+        with jconn() as c:
+            c.execute('INSERT INTO live_signal_locks(signal_key,ticket_id,status) VALUES(?,?,?)',(signal_key,ticket_id,'SUBMITTING'))
+    except sqlite3.IntegrityError:
+        raise LiveOrderError('This Gann signal has already been submitted. Duplicate order blocked.')
+
+def mark_live_signal(signal_key:str,status:str):
+    with jconn() as c:
+        c.execute('UPDATE live_signal_locks SET status=?,updated_at=CURRENT_TIMESTAMP WHERE signal_key=?',(status,signal_key))
 
 def open_live_spreads():
     with jconn() as c:rows=c.execute("SELECT payload_json FROM live_spreads WHERE status IN ('ORDERS_SENT','SHORT_CLOSED')").fetchall()
@@ -328,8 +345,13 @@ def live_options_ticket(req:LiveTicketRequest):
             raise LiveOrderError('There is no confirmed open Gann signal for the current session')
         if trade.get('side')!=req.signal.strip().upper():
             raise LiveOrderError('The requested side does not match the current confirmed Gann signal')
-        ticket=build_ticket(client(),req.signal,650,req.sell_delta,req.buy_delta)
-        ticket.update({'signal_key':f"{trade.get('date')}|{trade.get('trade_no')}|{trade.get('entry_time')}",'underlying_entry':trade.get('entry'),'underlying_stop':trade.get('stop'),'underlying_target':trade.get('target'),'underlying_trade_no':trade.get('trade_no'),'underlying_date':trade.get('date')})
+        if req.quantity not in (65,650):
+            raise LiveOrderError('Quantity must be 65 for one-lot test mode or 650 for normal mode')
+        signal_key=f"{trade.get('date')}|{trade.get('trade_no')}|{trade.get('entry_time')}"
+        if signal_already_used(signal_key):
+            raise LiveOrderError('This Gann signal has already been submitted. Duplicate order blocked.')
+        ticket=build_ticket(client(),req.signal,req.quantity,req.sell_delta,req.buy_delta)
+        ticket.update({'signal_key':signal_key,'underlying_entry':trade.get('entry'),'underlying_stop':trade.get('stop'),'underlying_target':trade.get('target'),'underlying_trade_no':trade.get('trade_no'),'underlying_date':trade.get('date')})
         return ticket
     except LiveOrderError as e:raise HTTPException(400,str(e))
     except Exception as e:raise HTTPException(400,f'Could not prepare option spread: {e}')
@@ -338,7 +360,22 @@ def live_options_ticket(req:LiveTicketRequest):
 def live_options_place(req:LivePlaceRequest):
     """Place the exact previewed ticket only after an explicit UI confirmation."""
     try:
-        spread=place_spread(client(),req.ticket_id,req.signal,req.quantity,req.sell_delta,req.buy_delta,req.confirmation);save_live_spread(spread);return spread
+        ticket=ticket_snapshot(req.ticket_id)
+        if ticket.get('quantity')!=req.quantity:
+            raise LiveOrderError('Ticket quantity changed; prepare a fresh ticket')
+        required=f"PLACE {req.quantity}"
+        if req.confirmation.strip().upper()!=required:
+            raise LiveOrderError(f'Type {required} in the confirmation box')
+        signal_key=str(ticket.get('signal_key') or '')
+        if not signal_key:
+            raise LiveOrderError('Ticket is missing its signal identity; prepare it again')
+        claim_live_signal(signal_key,req.ticket_id)
+        try:
+            spread=place_spread(client(),req.ticket_id,req.signal,req.quantity,req.sell_delta,req.buy_delta,req.confirmation)
+            save_live_spread(spread);mark_live_signal(signal_key,'PLACED');return spread
+        except Exception:
+            mark_live_signal(signal_key,'FAILED_REVIEW')
+            raise
     except LiveOrderError as e:raise HTTPException(400,str(e))
     except Exception as e:raise HTTPException(400,f'Order placement failed: {e}')
 
