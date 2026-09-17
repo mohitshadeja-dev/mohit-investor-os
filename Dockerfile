@@ -14,7 +14,6 @@ COPY weekly-route-patch.py /app/weekly-route-patch.py
 COPY lab-upgrade.js /app/lab-upgrade.js
 COPY presets-7750.js /app/presets-7750.js
 COPY weekly-wma-gann.js /app/weekly-wma-gann.js
-COPY weekly-reverse-only.js /app/weekly-reverse-only.js
 COPY options_backtest.py /app/options_backtest.py
 COPY stockmock-worklist.js /app/stockmock-worklist.js
 COPY live-execution.py /app/live-execution.py
@@ -42,7 +41,6 @@ RUN apt-get update && apt-get install -y unzip && \
     cp /app/lab-upgrade.js /app/app/static/lab-upgrade.js && \
     cp /app/presets-7750.js /app/app/static/presets-7750.js && \
     cp /app/weekly-wma-gann.js /app/app/static/weekly-wma-gann.js && \
-    cp /app/weekly-reverse-only.js /app/app/static/weekly-reverse-only.js && \
     cp /app/options_backtest.py /app/app/options_backtest.py && \
     cp /app/stockmock-worklist.js /app/app/static/stockmock-worklist.js && \
     cp /app/live-execution.py /app/app/live_execution.py && \
