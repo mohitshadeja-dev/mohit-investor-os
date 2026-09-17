@@ -80,7 +80,7 @@ def analyze_company(name: str):
     income = ticker.income_stmt
     balance = ticker.balance_sheet
     cashflow = ticker.cashflow
-    if not info and (income is None or income.empty):
+    if income is None or income.empty or balance is None or balance.empty:
         raise ValueError(f"Could not find an Indian listed company for '{name}'")
 
     revenue = _row(income, "Total Revenue", "Operating Revenue")
@@ -162,7 +162,13 @@ def analyze_company(name: str):
     if fcf is not None and fcf < 0: warnings.append("Latest reported free cash flow is negative.")
     if pat_cagr is not None and rev_cagr is not None and pat_cagr < 0 < rev_cagr: warnings.append("Sales grew while PAT declined.")
 
-    if normalized >= 85 and not warnings:
+    metric_values = [rev_cagr, pat_cagr, roe, roce, cfo_pat, fcf_margin, debt_equity, interest_cover, pe]
+    available_metrics = sum(value is not None for value in metric_values)
+    data_coverage = round(available_metrics / len(metric_values) * 100)
+
+    if verified_weight < 35 or available_metrics < 5:
+        verdict, action = "DATA INCOMPLETE — NOT SCORED", "The source did not return enough verified financial data. This is not a zero score and not an Avoid verdict."
+    elif normalized >= 85 and not warnings:
         verdict, action = "PROVISIONAL WATCHLIST", "Verify governance, auditor, customers, order book and valuation before any purchase."
     elif normalized >= 70 and len(warnings) <= 2:
         verdict, action = "DEEP RESEARCH", "Financials pass the first screen, but weaknesses and unverified evidence block a Buy decision."
@@ -183,6 +189,7 @@ def analyze_company(name: str):
         "week_52_high": high52, "week_52_low": low52, "currency": info.get("currency") or "INR",
         "metrics": metrics, "dimensions": [{"name": n, "weight": w, "score": s, "basis": b} for n, w, s, b in dimensions],
         "raw_score": raw_score, "verified_weight": verified_weight, "normalized_financial_score": normalized,
+        "data_coverage": data_coverage, "available_metrics": available_metrics,
         "verdict": verdict, "action": action, "warnings": warnings,
         "unverified": [d[0] for d in dimensions if d[2] is None],
         "source": "Yahoo Finance public market and reported-statement data via yfinance",
