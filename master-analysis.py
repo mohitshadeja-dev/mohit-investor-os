@@ -11,6 +11,7 @@ from html.parser import HTMLParser
 import pandas as pd
 import yfinance as yf
 from .annual_report_analysis import discover_and_analyze
+from .technical_analysis import analyze_technical
 
 SME_SNAPSHOTS={
  'INFLUX':{'company':'Influx Healthtech Ltd','price':284,'mcap':657,'pe':32.0,'roe':30.0,'roce':40.0,'sales':[147,105,100,76,59],'profit':[21,13,11,7,4],'cfo':4,'fcf':-21,'debt':0,'equity':101,'debtor':84,'inventory':67,'payable':80,'ccc':71},
@@ -236,6 +237,11 @@ def _attach_annual_report_review(result, symbol, website=None):
     return result
 
 
+def _attach_technical(result, symbol):
+    result['technical']=analyze_technical(symbol)
+    return result
+
+
 def _analyze_cached_sme(symbol):
     d=SME_SNAPSHOTS.get(symbol)
     if not d:return None
@@ -251,7 +257,7 @@ def _analyze_cached_sme(symbol):
     else:verdict,action='AVOID / WAIT','The verified financial screen has material weaknesses. Review the warnings and latest filings.'
     metrics={'Revenue CAGR':rev_cagr,'PAT CAGR':pat_cagr,'EBITDA CAGR':None,'EPS CAGR':None,'ROE':d['roe'],'ROCE':d['roce'],'Incremental ROIC':None,'CFO / PAT':cfo_pat,'FCF margin':fcf_margin,'Debt / equity':debt_equity,'Interest coverage':None,'Debtor days':d['debtor'],'Inventory days':d['inventory'],'Payable days':d['payable'],'Cash conversion cycle':d['ccc'],'P/E':d['pe'],'PEG':peg,'52-week drawdown':None}
     result={'company':d['company'],'symbol':symbol,'exchange':'NSE SME','sector':None,'industry':None,'price':d['price'],'market_cap_crore':d['mcap'],'week_52_high':None,'week_52_low':None,'currency':'INR','metrics':metrics,'dimensions':[{'name':n,'weight':w,'score':s,'basis':b} for n,w,s,b in dims],'raw_score':raw,'verified_weight':weight,'normalized_financial_score':score,'data_coverage':78,'available_metrics':7,'verdict':verdict,'action':action,'warnings':warnings,'unverified':[x[0] for x in dims if x[2] is None],'source':f'Cached verified public snapshot (17 Sep 2026) with NSE/Screener references — https://www.screener.in/company/{symbol}/','fetched_at':datetime.now(timezone.utc).isoformat(),'disclaimer':'Automatic screening is not a recommendation. Recheck live price and the latest exchange filings.'}
-    return _attach_annual_report_review(result,symbol)
+    return _attach_technical(_attach_annual_report_review(result,symbol),symbol)
 
 
 def _resolve_company(name: str):
@@ -402,4 +408,4 @@ def analyze_company(name: str):
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "disclaimer": "Automatic screening is not a recommendation. Exchange filings and annual reports remain the source of truth.",
     }
-    return _attach_annual_report_review(result, symbol, info.get('website'))
+    return _attach_technical(_attach_annual_report_review(result, symbol, info.get('website')),symbol)
