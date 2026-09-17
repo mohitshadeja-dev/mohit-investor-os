@@ -10,6 +10,7 @@ from html.parser import HTMLParser
 
 import pandas as pd
 import yfinance as yf
+from .annual_report_analysis import discover_and_analyze
 
 SME_SNAPSHOTS={
  'INFLUX':{'company':'Influx Healthtech Ltd','price':284,'mcap':657,'pe':32.0,'roe':30.0,'roce':40.0,'sales':[147,105,100,76,59],'profit':[21,13,11,7,4],'cfo':4,'fcf':-21,'debt':0,'equity':101,'debtor':84,'inventory':67,'payable':80,'ccc':71},
@@ -181,14 +182,31 @@ def _score_linear(value, bad, good, weight, higher=True):
     return round(_clip(progress, 0, 1) * weight, 1)
 
 
-def _attach_annual_report_review(result, symbol):
+def _attach_annual_report_review(result, symbol, website=None):
     """Merge only primary-source, human-reviewed annual-report evidence."""
     key=str(symbol or '').upper().replace('.NS','').replace('.BO','')
     review=ANNUAL_REPORT_REVIEWS.get(key)
     if not review:
-        result['annual_report']={'status':'NOT_REVIEWED','year':None,'url':None,'findings':[],
-                                 'message':'No annual report has been reviewed for this company yet.'}
-        result['combined_framework_score']=None
+        auto=discover_and_analyze(website)
+        result['annual_report']=auto
+        if auto.get('status')!='AUTO_REVIEWED':
+            result['combined_framework_score']=None
+            return result
+        overrides=auto.get('scores',{})
+        for item in result['dimensions']:
+            if item['name'] in overrides:
+                item['score']=overrides[item['name']]
+                item['basis']=f"Annual report {auto.get('year')} — automatic full-PDF evidence scan"
+        verified=[d for d in result['dimensions'] if d.get('score') is not None]
+        raw=round(sum(float(d['score']) for d in verified),1)
+        weight=sum(float(d['weight']) for d in verified)
+        result['raw_score']=raw;result['verified_weight']=weight
+        result['combined_framework_score']=round(raw/weight*100,1) if weight else None
+        result['normalized_financial_score']=result['combined_framework_score']
+        result['unverified']=[d['name'] for d in result['dimensions'] if d.get('score') is None]
+        result['warnings']=list(dict.fromkeys(result.get('warnings',[])+auto.get('warnings',[])))
+        result['source']=result.get('source','')+' | Annual report: '+str(auto.get('url'))
+        result['disclaimer']='Automatic full-PDF evidence scan, not a recommendation. Verify cited pages, later filings and current valuation.'
         return result
     overrides=review['scores']
     for item in result['dimensions']:
@@ -378,4 +396,4 @@ def analyze_company(name: str):
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "disclaimer": "Automatic screening is not a recommendation. Exchange filings and annual reports remain the source of truth.",
     }
-    return _attach_annual_report_review(result, symbol)
+    return _attach_annual_report_review(result, symbol, info.get('website'))
