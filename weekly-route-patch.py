@@ -1,36 +1,66 @@
 from pathlib import Path
+
 p=Path('/app/app/main.py')
 s=p.read_text(encoding='utf-8')
 if 'from .weekly_wma_gann import run_weekly' not in s:
     s=s.replace('from .strategy_lab import run_lab','from .strategy_lab import run_lab\nfrom .weekly_wma_gann import run_weekly')
-block='''\n\nclass WeeklyWmaGannRequest(BaseModel):\n    symbol:str='NIFTY 50'\n    instrument_token:int|None=None\n    from_date:date\n    to_date:date\n    wma_factor:float=.382\n    gann_step:float=.125\n    target_points:float=100.0\n    gap_near_target_points:float=30.0\n    same_bar_policy:str='stop_first'\n\ndef _reverse_only_summary(trades, base_summary):\n    rev=[t for t in trades if t.get('leg')=='REVERSE']\n    pts=[float(t.get('points') or 0) for t in rev]\n    eq=peak=dd=0.0\n    for x in pts:\n        eq+=x; peak=max(peak,eq); dd=max(dd,peak-eq)\n    wins=sum(x>0 for x in pts)\n    return {\n        'weeks':base_summary.get('weeks',0),\n        'trades':len(rev),\n        'wins':wins,\n        'losses':sum(x<0 for x in pts),\n        'win_rate':round(100*wins/len(rev),2) if rev else 0,\n        'total_points':round(sum(pts),2),\n        'avg_points':round(sum(pts)/len(rev),2) if rev else 0,\n        'targets':sum(t.get('reason')=='TARGET' for t in rev),\n        'stops':sum(t.get('reason')=='SL' for t in rev),\n        'data_end_exits':sum(t.get('reason')=='DATA_END' for t in rev),\n        'max_drawdown_points':round(dd,2),\n        'long_trades':sum(t.get('side')=='LONG' for t in rev),\n        'short_trades':sum(t.get('side')=='SHORT' for t in rev),\n        'long_points':round(sum(float(t.get('points') or 0) for t in rev if t.get('side')=='LONG'),2),\n        'short_points':round(sum(float(t.get('points') or 0) for t in rev if t.get('side')=='SHORT'),2),\n        'overnight_carries':sum(bool(t.get('carried_overnight')) for t in rev),\n        'virtual_primary_setups':base_summary.get('primary_trades',0),\n        'primary_failures_triggering_reverse':len(rev)\n    }\n\n@app.post('/api/weekly/backtest')\ndef weekly_wma_gann_backtest(req:WeeklyWmaGannRequest):\n    if req.from_date>=req.to_date:\n        raise HTTPException(400,'From date must be before To date')\n    try:\n        inst={'symbol':req.symbol,'instrument_token':req.instrument_token} if req.instrument_token else resolve_symbol(req.symbol)\n        df=fetch_minutes(int(inst['instrument_token']),req.from_date,req.to_date)\n        if df.empty:\n            raise RuntimeError('No 1-minute candles returned by Zerodha for this range')\n        summary,trades,attempts=run_weekly(df,req.wma_factor,req.gann_step,req.target_points,req.gap_near_target_points,req.same_bar_policy)\n        return {\n            'source':'Zerodha Kite 1-minute historical data aggregated to completed 5-minute closes',\n            'strategy':'Weekly WMA-Gann positional',\n            'symbol':inst.get('symbol',req.symbol),\n            'instrument_token':int(inst['instrument_token']),\n            'candles':len(df),\n            'summary':summary,\n            'trades':trades,\n            'attempts':attempts,\n            'config':req.model_dump(),\n            'rules':{\n                'entry':'5-minute close only; Gann + Tuesday High/Low + previous-day Fib filter',\n                'target':'100 points',\n                'stop':'Opposite Gann boundary on 5-minute close',\n                'carry':'Positional across trading days/weeks until target or SL',\n                'reverse':'One reverse after primary SL, target 100 points',\n                'overlap':'No new weekly setup while primary/reverse position is open'\n            }\n        }\n    except Exception as e:\n        raise HTTPException(400,str(e))\n\n@app.post('/api/weekly/reverse-only')\ndef weekly_reverse_only_backtest(req:WeeklyWmaGannRequest):\n    if req.from_date>=req.to_date:\n        raise HTTPException(400,'From date must be before To date')\n    try:\n        inst={'symbol':req.symbol,'instrument_token':req.instrument_token} if req.instrument_token else resolve_symbol(req.symbol)\n        df=fetch_minutes(int(inst['instrument_token']),req.from_date,req.to_date)\n        if df.empty:\n            raise RuntimeError('No 1-minute candles returned by Zerodha for this range')\n        base_summary,all_trades,attempts=run_weekly(df,req.wma_factor,req.gann_step,req.target_points,req.gap_near_target_points,req.same_bar_policy)\n        rev=[t for t in all_trades if t.get('leg')=='REVERSE']\n        summary=_reverse_only_summary(all_trades,base_summary)\n        return {\n            'source':'Zerodha Kite 1-minute historical data aggregated to completed 5-minute closes',\n            'strategy':'Reverse-Only Weekly WMA-Gann positional',\n            'symbol':inst.get('symbol',req.symbol),\n            'instrument_token':int(inst['instrument_token']),\n            'candles':len(df),\n            'summary':summary,\n            'trades':rev,\n            'attempts':attempts,\n            'config':req.model_dump(),\n            'rules':{\n                'primary':'Virtual only; its P&L is ignored',\n                'reverse_trigger':'Take opposite trade only when virtual primary hits Gann SL on a 5-minute close',\n                'target':'Reverse target 100 points',\n                'stop':'Reverse SL is opposite Gann boundary on 5-minute close',\n                'carry':'Reverse position is positional until target or SL',\n                'repeat':'No repeated flip-flopping'\n            }\n        }\n    except Exception as e:\n        raise HTTPException(400,str(e))\n'''
-block=block.replace(
-    "    gap_near_target_points:float=30.0\n    same_bar_policy:str='stop_first'",
-    "    gap_near_target_points:float=30.0\n    first_candle_distance_points:float=150.0\n    reverse_target_points:float=200.0\n    same_bar_policy:str='stop_first'"
-    .replace("\n    same_bar_policy:str='stop_first'", "\n    primary_stop_mode:str='gann'\n    primary_stop_points:float=100.0\n    reverse_stop_mode:str='gann'\n    reverse_stop_points:float=100.0\n    same_bar_policy:str='stop_first'")
-)
-block=block.replace(
-    "req.gap_near_target_points,req.same_bar_policy)",
-    "req.gap_near_target_points,req.same_bar_policy,req.first_candle_distance_points,req.reverse_target_points,req.primary_stop_mode,req.primary_stop_points,req.reverse_stop_mode,req.reverse_stop_points)"
-)
-block=block.replace(
-    "                'entry':'5-minute close only; Gann + Tuesday High/Low + previous-day Fib filter',",
-    "                'entry':'5-minute close only; Gann + Tuesday High/Low + previous-day Fib filter',\n"
-    "                'distance_filter':'Skip the day when first 5m High is 150+ above previous-day Low or first 5m Low is 150+ below previous-day High; resume next day',\n"
-    "                'reverse_target':'200 points',"
-)
-block=block.replace("'reverse':'One reverse after primary SL, target 100 points'","'reverse':'One reverse after primary SL, target 200 points'")
-block=block.replace("'target':'Reverse target 100 points'","'target':'Reverse target 200 points'")
-block=block.replace("'target':'100 points'","'target':'Editable primary target (default 100 points)'")
-block=block.replace("'stop':'Opposite Gann boundary on 5-minute close'","'stop':'Editable primary SL: opposite Gann or fixed points, evaluated on 5-minute close'")
-block=block.replace("'reverse':'One reverse after primary SL, target 200 points'","'reverse':'One reverse after primary SL; editable target (default 200) and editable SL'")
-block=block.replace("'target':'Reverse target 200 points'","'target':'Editable reverse target (default 200 points)'")
-block=block.replace("'stop':'Reverse SL is opposite Gann boundary on 5-minute close'","'stop':'Editable reverse SL: opposite Gann or fixed points, evaluated on 5-minute close'")
+
+block='''
+
+class WeeklyWmaGannRequest(BaseModel):
+    symbol:str='NIFTY 50'
+    instrument_token:int|None=None
+    from_date:date
+    to_date:date
+    wma_factor:float=.382
+    gann_step:float=.125
+    target_points:float=100.0
+    gap_near_target_points:float=30.0
+    first_candle_distance_points:float=150.0
+    primary_stop_mode:str='gann'
+    primary_stop_points:float=100.0
+    same_bar_policy:str='stop_first'
+
+@app.post('/api/weekly/backtest')
+def weekly_wma_gann_backtest(req:WeeklyWmaGannRequest):
+    if req.from_date>=req.to_date:
+        raise HTTPException(400,'From date must be before To date')
+    try:
+        inst={'symbol':req.symbol,'instrument_token':req.instrument_token} if req.instrument_token else resolve_symbol(req.symbol)
+        df=fetch_minutes(int(inst['instrument_token']),req.from_date,req.to_date)
+        if df.empty:
+            raise RuntimeError('No 1-minute candles returned by Zerodha for this range')
+        summary,trades,attempts=run_weekly(
+            df,wma_factor=req.wma_factor,gann_step=req.gann_step,
+            target_points=req.target_points,gap_near_target_points=req.gap_near_target_points,
+            same_bar_policy=req.same_bar_policy,
+            first_candle_distance_points=req.first_candle_distance_points,
+            primary_stop_mode=req.primary_stop_mode,primary_stop_points=req.primary_stop_points)
+        return {
+            'source':'Zerodha Kite 1-minute historical data aggregated to completed 5-minute closes',
+            'strategy':'Weekly WMA-Gann positional — primary trade only',
+            'symbol':inst.get('symbol',req.symbol),
+            'instrument_token':int(inst['instrument_token']),
+            'candles':len(df),
+            'summary':summary,
+            'trades':trades,
+            'attempts':attempts,
+            'config':req.model_dump(),
+            'rules':{
+                'entry':'5-minute close only; Gann + Tuesday High/Low + previous-day Fib filter',
+                'distance_filter':'Skip the day when first 5m High is 150+ above previous-day Low or first 5m Low is 150+ below previous-day High; resume next day',
+                'target':'Editable primary target (default 100 points)',
+                'stop':'Editable primary SL: opposite Gann or fixed points, evaluated on 5-minute close',
+                'carry':'Positional across trading days/weeks until target or SL',
+                'reverse':'Disabled — a primary SL closes the setup with no opposite trade',
+                'overlap':'No new weekly setup while the primary position is open'
+            }
+        }
+    except Exception as e:
+        raise HTTPException(400,str(e))
+'''
+
 if "@app.post('/api/weekly/backtest')" not in s:
     s += block
-else:
-    # During image build main.py starts from the packaged base, so this branch is normally not used.
-    if "@app.post('/api/weekly/reverse-only')" not in s:
-        s += block.split("@app.post('/api/weekly/backtest')")[0] + block.split("@app.post('/api/weekly/reverse-only')")[1]
 p.write_text(s,encoding='utf-8')
-print('Weekly positional + reverse-only APIs wired')
+print('Weekly positional primary-only API wired')
