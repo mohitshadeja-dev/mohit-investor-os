@@ -119,12 +119,9 @@ def health(): return {'ok':True,'service':'mohit-strategy-lab-v3'}
 @app.post('/api/master-framework/analyze')
 def master_framework_analyze(req:MasterAnalyzeRequest):
     try:
-        try:
-            inst=resolve_symbol(req.name)
-            lookup=f"{inst['symbol']}.NS" if inst.get('exchange','NSE')=='NSE' else inst['symbol']
-        except Exception:
-            lookup=req.name
-        result=analyze_company(lookup)
+        # Keep the submitted name intact so verified SME snapshots are checked
+        # before any external symbol lookup or network request.
+        result=analyze_company(req.name)
         result['requested_name']=req.name
         return result
     except ValueError as e:raise HTTPException(404,str(e))
