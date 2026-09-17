@@ -17,6 +17,7 @@ from .strategy_lab import run_lab
 from .options_backtest import run_options_backtest
 from .live_execution import LiveOrderError, build_ticket, ticket_snapshot, place_spread, close_spread, close_spread_record, order_book
 from .live_signal_7575 import scan_live_7575
+from .master_analysis import analyze_company
 
 ROOT=Path(__file__).resolve().parent
 DB=Path(os.getenv('APP_DB_PATH','./mohit_os.db'))
@@ -52,6 +53,7 @@ class LiveCloseRequest(BaseModel):
     spread_id:str=Field(min_length=8,max_length=80)
     confirmation:str
 class JournalNoteRequest(BaseModel): notes:str=Field(default='',max_length=4000)
+class MasterAnalyzeRequest(BaseModel): name:str=Field(min_length=2,max_length=100)
 
 INSTRUMENT_CACHE={'ts':0,'rows':[]}; JOBS={}
 
@@ -114,6 +116,11 @@ def home(): return FileResponse(ROOT/'static'/'index.html')
 def research_dashboard(): return FileResponse(ROOT/'static'/'research-dashboard.html')
 @app.get('/health')
 def health(): return {'ok':True,'service':'mohit-strategy-lab-v3'}
+@app.post('/api/master-framework/analyze')
+def master_framework_analyze(req:MasterAnalyzeRequest):
+    try:return analyze_company(req.name)
+    except ValueError as e:raise HTTPException(404,str(e))
+    except Exception as e:raise HTTPException(502,f'Financial data could not be loaded: {e}')
 @app.get('/api/kite/status')
 def status():
     configured=bool(get_secret('kite_api_key') or os.getenv('KITE_API_KEY'))
