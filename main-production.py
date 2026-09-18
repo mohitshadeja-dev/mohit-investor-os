@@ -46,7 +46,7 @@ class Sandbox7576Request(LabRequest):
     include_tuesday:bool=True
     fibonacci_mode:str='off'
     fibonacci_ratio:float=Field(default=.382,gt=0,lt=1)
-    previous_day_breakout:bool=True
+    previous_day_breakout:bool=False
     previous_day_distance:float=Field(default=0,ge=0)
     opening_filter:str='all'
     gap_threshold_points:float=Field(default=50,ge=0)
