@@ -3,6 +3,7 @@ WORKDIR /app
 COPY mohit_investor_os_app.zip /app/app.zip
 COPY index-production.html /app/index-production.html
 COPY research-dashboard.html /app/research-dashboard.html
+COPY research-7576.html /app/research-7576.html
 COPY store-production.py /app/store-production.py
 COPY main-production.py /app/main-production.py
 COPY strategy-lab.py /app/strategy-lab.py
@@ -24,12 +25,14 @@ COPY master-analysis.py /app/master-analysis.py
 COPY annual-report-analysis.py /app/annual-report-analysis.py
 COPY technical-analysis.py /app/technical-analysis.py
 COPY weekly-volume-scanner.py /app/weekly-volume-scanner.py
+COPY sandbox-7576.py /app/sandbox-7576.py
 COPY live-signal-7575.py /app/live-signal-7575.py
 COPY inject-lab.py /app/inject-lab.py
 RUN apt-get update && apt-get install -y unzip && \
     unzip /app/app.zip -d /app && \
     cp /app/index-production.html /app/app/static/index.html && \
     cp /app/research-dashboard.html /app/app/static/research-dashboard.html && \
+    cp /app/research-7576.html /app/app/static/research-7576.html && \
     cp /app/store-production.py /app/app/store.py && \
     cp /app/main-production.py /app/app/main.py && \
     cp /app/strategy-lab.py /app/app/strategy_lab_base.py && \
@@ -51,6 +54,7 @@ RUN apt-get update && apt-get install -y unzip && \
     cp /app/annual-report-analysis.py /app/app/annual_report_analysis.py && \
     cp /app/technical-analysis.py /app/app/technical_analysis.py && \
     cp /app/weekly-volume-scanner.py /app/app/weekly_volume_scanner.py && \
+    cp /app/sandbox-7576.py /app/app/sandbox_7576.py && \
     cp /app/live-signal-7575.py /app/app/live_signal_7575.py && \
     python /app/inject-lab.py && \
     pip install --no-cache-dir -r /app/requirements.txt yfinance pypdf && \
