@@ -159,13 +159,19 @@ def run_7576_sandbox(df, cfg):
     mode = str(cfg.get('execution_mode', 'intraday')).lower()
     eligible, first_candles = _first_candle_filter(df, cfg)
     previous_levels = _previous_day_levels(df, cfg)
+    # The 09:15-09:20 gate is knowable only after the first five-minute
+    # candle has completed. Never let the underlying engine create a trade
+    # before 09:20, even when the editable session start is earlier.
+    gated_cfg = dict(cfg)
+    if str(gated_cfg.get('start_time', '09:15')) < '09:20':
+        gated_cfg['start_time'] = '09:20'
     if mode == 'intraday':
-        summary,trades,_,_=run_lab(df,cfg)
+        summary,trades,_,_=run_lab(df,gated_cfg)
         return _filtered_result(trades,summary,first_candles,previous_levels,cfg)
     if mode != 'positional':
         raise ValueError("Execution mode must be 'intraday' or 'positional'")
 
-    candidate_cfg = dict(cfg)
+    candidate_cfg = dict(gated_cfg)
     candidate_cfg['execution_mode'] = 'intraday'
     _, candidates, _, _ = run_lab(df, candidate_cfg)
     minutes = norm(df)
