@@ -33,14 +33,63 @@ def _first_candle_filter(df, cfg):
     return eligible, details
 
 
-def _filtered_result(trades, base_summary, details):
-    allowed=[t for t in trades if details.get(str(t.get('date')),{}).get('status')=='ELIGIBLE'
-             and t.get('side')==details.get(str(t.get('date')),{}).get('allowed_side')]
+def _previous_day_levels(df, cfg):
+    d=norm(df);d['session']=d.date.dt.date
+    sessions=[(k,v) for k,v in d.groupby('session',sort=True)]
+    ratio=float(cfg.get('fibonacci_ratio',.382) or .382)
+    levels={}
+    for i in range(1,len(sessions)):
+        current,_=sessions[i];_,prev=sessions[i-1]
+        high,low=float(prev.high.max()),float(prev.low.min());span=high-low
+        levels[str(current)]={'prev_high':high,'prev_low':low,
+                              'low_to_high':low+span*ratio,'high_to_low':high-span*ratio}
+    return levels
+
+
+def _period_key(trade, period):
+    d=pd.Timestamp(str(trade.get('date')))
+    if period=='week':
+        iso=d.isocalendar();return f'{int(iso.year)}-W{int(iso.week):02d}'
+    if period=='month':return d.strftime('%Y-%m')
+    return d.strftime('%Y-%m-%d')
+
+
+def _apply_research_filters(trades, details, levels, cfg, apply_period=True):
+    direction=str(cfg.get('direction','both')).lower();fib=str(cfg.get('fibonacci_mode','off')).lower()
+    include_tuesday=bool(cfg.get('include_tuesday',True));period=str(cfg.get('one_trade_period','day')).lower()
+    maximum=max(1,int(cfg.get('max_trades_period',3) or 3))
+    allowed=[];counts={};blocked={'colour':0,'tuesday':0,'fibonacci':0,'period':0}
+    for t in sorted(trades,key=lambda x:_ts(x['entry_time'])):
+        date=str(t.get('date'));info=details.get(date,{})
+        if info.get('status')!='ELIGIBLE' or t.get('side')!=info.get('allowed_side'):
+            blocked['colour']+=1;continue
+        if direction=='long' and t.get('side')!='LONG':continue
+        if direction=='short' and t.get('side')!='SHORT':continue
+        if not include_tuesday and pd.Timestamp(date).weekday()==1:
+            blocked['tuesday']+=1;continue
+        if fib!='off':
+            lv=levels.get(date);entry=float(t.get('entry',0));side=t.get('side')
+            threshold=lv.get(fib) if lv else None
+            if threshold is None or (side=='LONG' and entry<=threshold) or (side=='SHORT' and entry>=threshold):
+                blocked['fibonacci']+=1;continue
+            t={**t,'previous_day_fibonacci':round(float(threshold),2),'fibonacci_mode':fib}
+        if apply_period:
+            key=_period_key(t,period)
+            if counts.get(key,0)>=maximum:
+                blocked['period']+=1;continue
+            counts[key]=counts.get(key,0)+1
+        allowed.append(t)
+    return allowed,blocked
+
+
+def _filtered_result(trades, base_summary, details, levels, cfg):
+    allowed,blocked=_apply_research_filters(trades,details,levels,cfg)
     stats={'engine':'sandbox_7576_intraday_first_candle_filter','test_days':base_summary.get('test_days',len(details)),
            'eligible_first_candle_days':sum(x['status']=='ELIGIBLE' for x in details.values()),
            'doji_days_skipped':sum(x['status']=='DOJI_SKIP' for x in details.values()),
            'wick_filter_days_skipped':sum(x['status']=='WICK_OVER_20_PERCENT_SKIP' for x in details.values()),
-           'opposite_colour_trades_blocked':sum(1 for t in trades if details.get(str(t.get('date')),{}).get('status')=='ELIGIBLE' and t.get('side')!=details.get(str(t.get('date')),{}).get('allowed_side')),
+           'opposite_colour_trades_blocked':blocked['colour'],'tuesday_trades_blocked':blocked['tuesday'],
+           'fibonacci_trades_blocked':blocked['fibonacci'],'period_limit_trades_blocked':blocked['period'],
            'no_touch':base_summary.get('no_touch',0),'touch_ambiguous':base_summary.get('touch_ambiguous',0),
            'no_trigger':base_summary.get('no_trigger',0),'same_bar_both':base_summary.get('same_bar_both',0)}
     summary=_summary(allowed,stats);summary['cost_to_cost_exits']=sum(t.get('reason')=='COST' for t in allowed)
@@ -109,9 +158,10 @@ def run_7576_sandbox(df, cfg):
     """
     mode = str(cfg.get('execution_mode', 'intraday')).lower()
     eligible, first_candles = _first_candle_filter(df, cfg)
+    previous_levels = _previous_day_levels(df, cfg)
     if mode == 'intraday':
         summary,trades,_,_=run_lab(df,cfg)
-        return _filtered_result(trades,summary,first_candles)
+        return _filtered_result(trades,summary,first_candles,previous_levels,cfg)
     if mode != 'positional':
         raise ValueError("Execution mode must be 'intraday' or 'positional'")
 
@@ -119,16 +169,21 @@ def run_7576_sandbox(df, cfg):
     candidate_cfg['execution_mode'] = 'intraday'
     _, candidates, _, _ = run_lab(df, candidate_cfg)
     minutes = norm(df)
-    candidates = sorted((x for x in candidates if str(x.get('date')) in eligible
-                         and x.get('side')==first_candles[str(x.get('date'))].get('allowed_side')),
-                        key=lambda x: _ts(x['entry_time']))
+    candidates,blocked_filters=_apply_research_filters(candidates,first_candles,previous_levels,cfg,apply_period=False)
     out = []
     blocked_until = None
     skipped_overlap = 0
+    period_counts = {}
+    period = str(cfg.get('one_trade_period','day')).lower()
+    maximum = max(1,int(cfg.get('max_trades_period',3) or 3))
     for candidate in candidates:
         entry_time = _ts(candidate['entry_time'])
         if blocked_until is not None and entry_time <= blocked_until:
             skipped_overlap += 1
+            continue
+        period_key = _period_key(candidate, period)
+        if period_counts.get(period_key,0) >= maximum:
+            blocked_filters['period'] += 1
             continue
         result = _positional_exit(minutes, candidate, cfg)
         if len(result) == 4:
@@ -147,6 +202,7 @@ def run_7576_sandbox(df, cfg):
             'carried_overnight': _ts(exit_time).date() > entry_time.date(),
         })
         out.append(trade)
+        period_counts[period_key] = period_counts.get(period_key,0) + 1
         blocked_until = _ts(exit_time)
 
     stats = {
@@ -158,6 +214,10 @@ def run_7576_sandbox(df, cfg):
         'eligible_first_candle_days': len(eligible),
         'doji_days_skipped': sum(x['status']=='DOJI_SKIP' for x in first_candles.values()),
         'wick_filter_days_skipped': sum(x['status']=='WICK_OVER_20_PERCENT_SKIP' for x in first_candles.values()),
+        'opposite_colour_trades_blocked':blocked_filters['colour'],
+        'tuesday_trades_blocked':blocked_filters['tuesday'],
+        'fibonacci_trades_blocked':blocked_filters['fibonacci'],
+        'period_limit_trades_blocked':blocked_filters['period'],
         'no_touch': 0, 'touch_ambiguous': 0, 'no_trigger': 0, 'same_bar_both': 0,
     }
     summary = _summary(out, stats)
