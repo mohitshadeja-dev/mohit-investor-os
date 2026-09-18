@@ -19,6 +19,7 @@ from .live_execution import LiveOrderError, build_ticket, ticket_snapshot, place
 from .live_signal_7575 import scan_live_7575
 from .master_analysis import analyze_company
 from .weekly_volume_scanner import scan_lifetime_weekly_volume
+from .sandbox_7576 import run_7576_sandbox
 
 ROOT=Path(__file__).resolve().parent
 DB=Path(os.getenv('APP_DB_PATH','./mohit_os.db'))
@@ -36,6 +37,8 @@ class LabRequest(BaseModel):
     reentry:bool=True; max_trades_per_day:int|None=None; same_bar_policy:str='stop_first'; direction:str='both'; entry_mode:str='close'; touch_side:str='both'
     start_time:str='09:15'; end_time:str='15:30'; cost_points:float=0; slippage_points:float=0
     trail_to_cost_points:float=80
+class Sandbox7576Request(LabRequest):
+    execution_mode:str='intraday'
 class SaveTestRequest(BaseModel): name:str=Field(min_length=1,max_length=100); symbol:str; config:dict; summary:dict; trades:list[dict]=[]
 class BatchRequest(BaseModel): symbols:list[str]; config:dict
 class DhanSettings(BaseModel): client_id:str=Field(min_length=3); access_token:str=Field(min_length=20)
@@ -122,6 +125,8 @@ def journal_rows():
 def home(): return FileResponse(ROOT/'static'/'index.html')
 @app.get('/research-dashboard')
 def research_dashboard(): return FileResponse(ROOT/'static'/'research-dashboard.html')
+@app.get('/research-7576')
+def research_7576(): return FileResponse(ROOT/'static'/'research-7576.html')
 @app.get('/health')
 def health(): return {'ok':True,'service':'mohit-strategy-lab-v3'}
 @app.post('/api/master-framework/analyze')
@@ -237,6 +242,21 @@ def lab_backtest(req:LabRequest):
         if df.empty:raise RuntimeError('No 1-minute candles returned by Zerodha for this range')
         cfg=req.model_dump(); summary,trades,daily,monthly=run_lab(df,cfg)
         return {'source':'Zerodha Kite 1-minute historical data','symbol':inst.get('symbol',req.symbol),'instrument_token':int(inst['instrument_token']),'candles':len(df),'summary':summary,'trades':trades,'daily':daily,'monthly':monthly,'config':cfg}
+    except Exception as e:raise HTTPException(400,str(e))
+
+@app.post('/api/research-7576/backtest')
+def research_7576_backtest(req:Sandbox7576Request):
+    if req.from_date>=req.to_date:raise HTTPException(400,'From date must be before To date')
+    if req.execution_mode not in ('intraday','positional'):raise HTTPException(400,'Choose intraday or positional execution')
+    try:
+        inst={'symbol':req.symbol,'instrument_token':req.instrument_token} if req.instrument_token else resolve_symbol(req.symbol)
+        df=fetch_minutes(int(inst['instrument_token']),req.from_date,req.to_date)
+        if df.empty:raise RuntimeError('No 1-minute candles returned by Zerodha for this range')
+        cfg=req.model_dump();summary,trades,daily,monthly=run_7576_sandbox(df,cfg)
+        return {'source':'Zerodha Kite 1-minute historical data','strategy':'Independent 7,576 research sandbox',
+                'symbol':inst.get('symbol',req.symbol),'instrument_token':int(inst['instrument_token']),
+                'candles':len(df),'summary':summary,'trades':trades,'daily':daily,'monthly':monthly,'config':cfg,
+                'production_baseline_affected':False}
     except Exception as e:raise HTTPException(400,str(e))
 
 @app.post('/api/lab/save')
