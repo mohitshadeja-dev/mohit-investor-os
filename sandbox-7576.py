@@ -39,9 +39,11 @@ def _previous_day_levels(df, cfg):
     ratio=float(cfg.get('fibonacci_ratio',.382) or .382)
     levels={}
     for i in range(1,len(sessions)):
-        current,_=sessions[i];_,prev=sessions[i-1]
+        current,current_day=sessions[i];_,prev=sessions[i-1]
         high,low=float(prev.high.max()),float(prev.low.min());span=high-low
-        levels[str(current)]={'prev_high':high,'prev_low':low,
+        prev_close=float(prev.iloc[-1].close);current_open=float(current_day.iloc[0].open)
+        levels[str(current)]={'prev_high':high,'prev_low':low,'prev_close':prev_close,
+                              'current_open':current_open,'opening_gap_points':current_open-prev_close,
                               'low_to_high':low+span*ratio,'high_to_low':high-span*ratio}
     return levels
 
@@ -58,7 +60,7 @@ def _apply_research_filters(trades, details, levels, cfg, apply_period=True):
     direction=str(cfg.get('direction','both')).lower();fib=str(cfg.get('fibonacci_mode','off')).lower()
     include_tuesday=bool(cfg.get('include_tuesday',True));period=str(cfg.get('one_trade_period','day')).lower()
     maximum=max(1,int(cfg.get('max_trades_period',3) or 3))
-    allowed=[];counts={};blocked={'colour':0,'tuesday':0,'fibonacci':0,'period':0}
+    allowed=[];counts={};blocked={'colour':0,'tuesday':0,'previous_day':0,'opening_type':0,'fibonacci':0,'period':0}
     for t in sorted(trades,key=lambda x:_ts(x['entry_time'])):
         date=str(t.get('date'));info=details.get(date,{})
         if info.get('status')!='ELIGIBLE' or t.get('side')!=info.get('allowed_side'):
@@ -67,8 +69,22 @@ def _apply_research_filters(trades, details, levels, cfg, apply_period=True):
         if direction=='short' and t.get('side')!='SHORT':continue
         if not include_tuesday and pd.Timestamp(date).weekday()==1:
             blocked['tuesday']+=1;continue
+        lv=levels.get(date);entry=float(t.get('entry',0));side=t.get('side')
+        if bool(cfg.get('previous_day_breakout',True)):
+            distance=max(0.0,float(cfg.get('previous_day_distance',0) or 0))
+            if lv is None or (side=='LONG' and entry<=float(lv['prev_high'])+distance) or (side=='SHORT' and entry>=float(lv['prev_low'])-distance):
+                blocked['previous_day']+=1;continue
+            t={**t,'previous_day_breakout_level':round(float(lv['prev_high'])+distance if side=='LONG' else float(lv['prev_low'])-distance,2),
+               'previous_day_distance':distance}
+        opening_filter=str(cfg.get('opening_filter','all')).lower()
+        if opening_filter!='all':
+            threshold=max(0.0,float(cfg.get('gap_threshold_points',50) or 0))
+            gap=float(lv['opening_gap_points']) if lv else 0.0
+            matches=(opening_filter=='gap_up' and gap>=threshold) or (opening_filter=='gap_down' and gap<=-threshold) or (opening_filter=='normal' and abs(gap)<threshold)
+            if not matches:
+                blocked['opening_type']+=1;continue
+            t={**t,'opening_type':opening_filter.upper(),'opening_gap_points':round(gap,2)}
         if fib!='off':
-            lv=levels.get(date);entry=float(t.get('entry',0));side=t.get('side')
             threshold=lv.get(fib) if lv else None
             if threshold is None or (side=='LONG' and entry<=threshold) or (side=='SHORT' and entry>=threshold):
                 blocked['fibonacci']+=1;continue
@@ -89,6 +105,7 @@ def _filtered_result(trades, base_summary, details, levels, cfg):
            'doji_days_skipped':sum(x['status']=='DOJI_SKIP' for x in details.values()),
            'wick_filter_days_skipped':sum(x['status']=='WICK_OVER_20_PERCENT_SKIP' for x in details.values()),
            'opposite_colour_trades_blocked':blocked['colour'],'tuesday_trades_blocked':blocked['tuesday'],
+           'previous_day_breakout_trades_blocked':blocked['previous_day'],'opening_type_trades_blocked':blocked['opening_type'],
            'fibonacci_trades_blocked':blocked['fibonacci'],'period_limit_trades_blocked':blocked['period'],
            'no_touch':base_summary.get('no_touch',0),'touch_ambiguous':base_summary.get('touch_ambiguous',0),
            'no_trigger':base_summary.get('no_trigger',0),'same_bar_both':base_summary.get('same_bar_both',0)}
@@ -222,6 +239,8 @@ def run_7576_sandbox(df, cfg):
         'wick_filter_days_skipped': sum(x['status']=='WICK_OVER_20_PERCENT_SKIP' for x in first_candles.values()),
         'opposite_colour_trades_blocked':blocked_filters['colour'],
         'tuesday_trades_blocked':blocked_filters['tuesday'],
+        'previous_day_breakout_trades_blocked':blocked_filters['previous_day'],
+        'opening_type_trades_blocked':blocked_filters['opening_type'],
         'fibonacci_trades_blocked':blocked_filters['fibonacci'],
         'period_limit_trades_blocked':blocked_filters['period'],
         'no_touch': 0, 'touch_ambiguous': 0, 'no_trigger': 0, 'same_bar_both': 0,
