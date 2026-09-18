@@ -41,6 +41,11 @@ class Sandbox7576Request(LabRequest):
     execution_mode:str='intraday'
     first_candle_body_percent:float=Field(default=80,ge=0,le=100)
     doji_body_percent:float=Field(default=10,ge=0,le=100)
+    one_trade_period:str='day'
+    max_trades_period:int=Field(default=3,ge=1)
+    include_tuesday:bool=True
+    fibonacci_mode:str='off'
+    fibonacci_ratio:float=Field(default=.382,gt=0,lt=1)
 class SaveTestRequest(BaseModel): name:str=Field(min_length=1,max_length=100); symbol:str; config:dict; summary:dict; trades:list[dict]=[]
 class BatchRequest(BaseModel): symbols:list[str]; config:dict
 class DhanSettings(BaseModel): client_id:str=Field(min_length=3); access_token:str=Field(min_length=20)
