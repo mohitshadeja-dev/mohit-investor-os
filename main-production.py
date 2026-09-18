@@ -305,6 +305,41 @@ def batch_status(job_id:str):
     if job_id not in JOBS:raise HTTPException(404,'Batch job not found')
     return JOBS[job_id]
 
+def _research_7576_batch_worker(jid,symbols,cfg):
+    job=JOBS[jid];results=[]
+    for i,symbol in enumerate(symbols):
+        try:
+            inst=resolve_symbol(symbol)
+            start=date.fromisoformat(str(cfg['from_date']))
+            end=date.fromisoformat(str(cfg['to_date']))
+            df=fetch_minutes(int(inst['instrument_token']),start,end)
+            if df.empty:raise RuntimeError('No 1-minute candles returned')
+            stock_cfg={**cfg,'symbol':inst['symbol'],'instrument_token':int(inst['instrument_token'])}
+            summary,_,_,_=run_7576_sandbox(df,stock_cfg)
+            results.append({'symbol':inst['symbol'],'ok':True,**summary})
+        except Exception as e:
+            results.append({'symbol':symbol,'ok':False,'error':str(e)})
+        ranked=sorted(results,key=lambda x:x.get('total_points',-1e18) if x.get('ok') else -1e18,reverse=True)
+        job.update({'done':i+1,'results':ranked})
+    job.update({'status':'complete','results':sorted(results,key=lambda x:x.get('total_points',-1e18) if x.get('ok') else -1e18,reverse=True),'finished_at':pytime.time()})
+
+@app.post('/api/research-7576/batch')
+def start_research_7576_batch(req:BatchRequest):
+    if not req.symbols:raise HTTPException(400,'Load the NIFTY 100 universe first')
+    try:
+        cfg=Sandbox7576Request(**req.config).model_dump(mode='json')
+    except Exception as e:
+        raise HTTPException(400,f'Invalid 7,576 batch settings: {e}')
+    jid='7576-'+uuid.uuid4().hex[:10]
+    JOBS[jid]={'id':jid,'strategy':'Independent 7,576 research sandbox','status':'running','total':len(req.symbols),'done':0,'results':[],'started_at':pytime.time(),'production_baseline_affected':False}
+    threading.Thread(target=_research_7576_batch_worker,args=(jid,req.symbols,cfg),daemon=True).start()
+    return JOBS[jid]
+
+@app.get('/api/research-7576/batch/{job_id}')
+def research_7576_batch_status(job_id:str):
+    if job_id not in JOBS or not job_id.startswith('7576-'):raise HTTPException(404,'7,576 batch job not found')
+    return JOBS[job_id]
+
 def _option_cache_get(key):
     with jconn() as c:r=c.execute('SELECT payload_json FROM option_data_cache WHERE cache_key=?',(key,)).fetchone()
     return json.loads(r['payload_json']) if r else None
