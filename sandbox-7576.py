@@ -26,16 +26,21 @@ def _first_candle_filter(df, cfg):
         if candle_range <= 0 or ratio <= doji_max: status = 'DOJI_SKIP'
         elif ratio < minimum: status = 'WICK_OVER_20_PERCENT_SKIP'
         else: status = 'ELIGIBLE'; eligible.add(str(session))
-        details[str(session)] = {'status': status, 'body_percent': round(ratio*100,2), 'wick_percent': round((1-ratio)*100,2) if candle_range>0 else 100.0}
+        allowed_side = 'LONG' if close > open_ else ('SHORT' if close < open_ else None)
+        details[str(session)] = {'status': status, 'allowed_side': allowed_side,
+                                 'candle_colour': 'GREEN' if allowed_side=='LONG' else ('RED' if allowed_side=='SHORT' else 'DOJI'),
+                                 'body_percent': round(ratio*100,2), 'wick_percent': round((1-ratio)*100,2) if candle_range>0 else 100.0}
     return eligible, details
 
 
 def _filtered_result(trades, base_summary, details):
-    allowed=[t for t in trades if details.get(str(t.get('date')),{}).get('status')=='ELIGIBLE']
+    allowed=[t for t in trades if details.get(str(t.get('date')),{}).get('status')=='ELIGIBLE'
+             and t.get('side')==details.get(str(t.get('date')),{}).get('allowed_side')]
     stats={'engine':'sandbox_7576_intraday_first_candle_filter','test_days':base_summary.get('test_days',len(details)),
            'eligible_first_candle_days':sum(x['status']=='ELIGIBLE' for x in details.values()),
            'doji_days_skipped':sum(x['status']=='DOJI_SKIP' for x in details.values()),
            'wick_filter_days_skipped':sum(x['status']=='WICK_OVER_20_PERCENT_SKIP' for x in details.values()),
+           'opposite_colour_trades_blocked':sum(1 for t in trades if details.get(str(t.get('date')),{}).get('status')=='ELIGIBLE' and t.get('side')!=details.get(str(t.get('date')),{}).get('allowed_side')),
            'no_touch':base_summary.get('no_touch',0),'touch_ambiguous':base_summary.get('touch_ambiguous',0),
            'no_trigger':base_summary.get('no_trigger',0),'same_bar_both':base_summary.get('same_bar_both',0)}
     summary=_summary(allowed,stats);summary['cost_to_cost_exits']=sum(t.get('reason')=='COST' for t in allowed)
@@ -114,7 +119,9 @@ def run_7576_sandbox(df, cfg):
     candidate_cfg['execution_mode'] = 'intraday'
     _, candidates, _, _ = run_lab(df, candidate_cfg)
     minutes = norm(df)
-    candidates = sorted((x for x in candidates if str(x.get('date')) in eligible), key=lambda x: _ts(x['entry_time']))
+    candidates = sorted((x for x in candidates if str(x.get('date')) in eligible
+                         and x.get('side')==first_candles[str(x.get('date'))].get('allowed_side')),
+                        key=lambda x: _ts(x['entry_time']))
     out = []
     blocked_until = None
     skipped_overlap = 0
