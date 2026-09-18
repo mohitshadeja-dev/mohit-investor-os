@@ -39,6 +39,8 @@ class LabRequest(BaseModel):
     trail_to_cost_points:float=80
 class Sandbox7576Request(LabRequest):
     execution_mode:str='intraday'
+    first_candle_body_percent:float=Field(default=80,ge=0,le=100)
+    doji_body_percent:float=Field(default=10,ge=0,le=100)
 class SaveTestRequest(BaseModel): name:str=Field(min_length=1,max_length=100); symbol:str; config:dict; summary:dict; trades:list[dict]=[]
 class BatchRequest(BaseModel): symbols:list[str]; config:dict
 class DhanSettings(BaseModel): client_id:str=Field(min_length=3); access_token:str=Field(min_length=20)
