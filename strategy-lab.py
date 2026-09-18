@@ -116,7 +116,7 @@ def run_original_7750(df):
     return _summary(out,stats),out,daily,_monthly(out)
 
 def _signal(bar,side,buy,sell,mode='close'):
-    if mode in ('wick','trigger'):
+    if mode in ('wick','trigger','marketable'):
         return float(bar.high)>=buy if side=='LONG' else float(bar.low)<=sell
     return float(bar.close)>=buy if side=='LONG' else float(bar.close)<=sell
 
@@ -163,6 +163,12 @@ def run_lab(df,cfg):
                 break
             had=True; n+=1
             if entry_mode=='trigger': entry=float(buy if side=='LONG' else sell)
+            elif entry_mode=='marketable':
+                # If the tradable bar opens beyond the stop trigger, the old
+                # trigger price is unavailable. Fill at that bar's open.
+                bar_open=float(entrybar.open)
+                if side=='LONG': entry=max(float(buy),bar_open)+slip
+                else: entry=min(float(sell),bar_open)-slip
             else: entry=float(entrybar.close)+(slip if side=='LONG' else -slip)
             if stop_mode=='gann': stop=sell if side=='LONG' else buy
             elif stop_mode=='points': stop=entry-stop_value if side=='LONG' else entry+stop_value
