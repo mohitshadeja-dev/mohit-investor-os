@@ -70,7 +70,7 @@ def _apply_research_filters(trades, details, levels, cfg, apply_period=True):
         if not include_tuesday and pd.Timestamp(date).weekday()==1:
             blocked['tuesday']+=1;continue
         lv=levels.get(date);entry=float(t.get('entry',0));side=t.get('side')
-        if bool(cfg.get('previous_day_breakout',True)):
+        if bool(cfg.get('previous_day_breakout',False)):
             distance=max(0.0,float(cfg.get('previous_day_distance',0) or 0))
             if lv is None or (side=='LONG' and entry<=float(lv['prev_high'])+distance) or (side=='SHORT' and entry>=float(lv['prev_low'])-distance):
                 blocked['previous_day']+=1;continue
