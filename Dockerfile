@@ -27,6 +27,9 @@ COPY technical-analysis.py /app/technical-analysis.py
 COPY weekly-volume-scanner.py /app/weekly-volume-scanner.py
 COPY sandbox-7576.py /app/sandbox-7576.py
 COPY live-signal-7575.py /app/live-signal-7575.py
+COPY realtime_alerts.py /app/realtime_alerts.py
+COPY realtime-alerts.js /app/realtime-alerts.js
+COPY inject-realtime.py /app/inject-realtime.py
 COPY inject-lab.py /app/inject-lab.py
 RUN apt-get update && apt-get install -y unzip && \
     unzip /app/app.zip -d /app && \
@@ -56,6 +59,9 @@ RUN apt-get update && apt-get install -y unzip && \
     cp /app/weekly-volume-scanner.py /app/app/weekly_volume_scanner.py && \
     cp /app/sandbox-7576.py /app/app/sandbox_7576.py && \
     cp /app/live-signal-7575.py /app/app/live_signal_7575.py && \
+    cp /app/realtime_alerts.py /app/app/realtime_alerts.py && \
+    cp /app/realtime-alerts.js /app/app/static/realtime-alerts.js && \
+    python /app/inject-realtime.py && \
     python /app/inject-lab.py && \
     pip install --no-cache-dir -r /app/requirements.txt yfinance pypdf && \
     mv /usr/local/bin/uvicorn /usr/local/bin/uvicorn-real && \
